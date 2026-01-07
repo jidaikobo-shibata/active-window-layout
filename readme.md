@@ -37,7 +37,7 @@ Directly controlling windows from scripts or key remappers often leads to:
 - **External control**
   Intended to be called from:
   - `gdbus`
-  - key remappers (e.g. xremap)
+  - key remappers (e.g. [xremap](https://github.com/xremap/xremap))
   - shell scripts
 
 - **Semantic-friendly**
