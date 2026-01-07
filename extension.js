@@ -45,15 +45,15 @@ const BUS_NAME = 'org.jidaikobo.shibata.ActiveWindowLayout';
 const OBJECT_PATH = '/org/jidaikobo/shibata/ActiveWindowLayout';
 
 class ServiceImpl {
-  // 現在のウィンドウの取得
+  // Get the current window
   _getFocusedWindow() {
     const win = global.display.get_focus_window();
     return win ?? null;
   }
 
-  // 最大化中だと move/resize が効かないことが多いので解除
-  // タイル（スナップ）状態だと制約されることがあるので解除
-  // 環境によってメソッド有無があるので存在チェック
+  // Move/resize often doesn't work when maximized, so disable it.
+  // Tile (snap) mode can be restrictive, so disable it.
+  // Check for existence of methods, as they may not be available depending on the environment.
   _ensureResizableMovable(win) {
     if (win.get_maximized && win.get_maximized() !== 0)
       win.unmaximize(Meta.MaximizeFlags.BOTH);
@@ -62,7 +62,7 @@ class ServiceImpl {
       win.untile();
   }
 
-  // moveとresizeの実行。Mutterの仕様により、2段階で動かす必要がある
+  // Execute move and resize. Due to Mutter's specifications, this must be done in two steps.
   _applyMoveResizeInWorkArea(win, dx, dy, width = null, height = null) {
     const workspace = global.workspace_manager.get_active_workspace();
     const wa = workspace.get_work_area_for_monitor(win.get_monitor());
@@ -71,11 +71,11 @@ class ServiceImpl {
 
     const rect = win.get_frame_rect();
 
-    // dx/dy が null の場合は現在位置を維持
+    // If dx/dy are null, maintain current position
     const x = (dx !== null) ? wa.x + dx : rect.x;
     const y = (dy !== null) ? wa.y + dy : rect.y;
 
-    // ① move（必要なら）
+    // ① move (if necessary)
     if (dx !== null || dy !== null) {
       win.move_resize_frame(
         true,
@@ -86,7 +86,7 @@ class ServiceImpl {
       );
     }
 
-    // ② resize（必要な場合のみ）
+    // ② resize (if necessary)
     if (width !== null && height !== null) {
       win.move_resize_frame(
         true,
