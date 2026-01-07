@@ -1,0 +1,6 @@
+{
+  "uuid": "active-window-layout@jidaikobo.shibata",
+  "name": "Active Window Layout",
+  "description": "Provides a D-Bus API for Work Area–based window move/resize, intended for keyboard-driven workflows and external automation.",
+  "shell-version": ["45", "46"]
+}
