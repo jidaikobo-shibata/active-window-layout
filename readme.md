@@ -190,6 +190,17 @@ Passing `null` preserves the current position or size of the window.
 
 ## Installation
 
+### Install from GitHub (recommended)
+
+Clone the repository directly into the GNOME Shell extensions directory:
+
+```bash
+cd ~/.local/share/gnome-shell/extensions
+git clone https://github.com/jidaikobo-shibata/active-window-layout.git active-window-layout@jidaikobo.shibata
+```
+
+The directory structure should look like this:
+
 ```
 ~/.local/share/gnome-shell/extensions/
 └── active-window-layout@jidaikobo.shibata/
@@ -197,7 +208,17 @@ Passing `null` preserves the current position or size of the window.
     └── metadata.json
 ```
 
-Enable the extension using GNOME Extensions, or run:
+### Reload GNOME Shell (required)
+
+GNOME Shell must be reloaded after installing a new extension.
+
+- **On X11**:
+  Press <kbd>Alt</kbd> + <kbd>F2</kbd>, type <kbd>r</kbd>, then press <kbd>Enter</kbd>.
+
+- **On Wayland**:
+  Log out and log in again, or reboot the system.
+
+After reloading GNOME Shell, enable the extension using:
 
 ```bash
 gnome-extensions enable active-window-layout@jidaikobo.shibata
