@@ -247,6 +247,7 @@ class ServiceImpl {
 
     const workspace = global.workspace_manager.get_active_workspace();
     const wa = workspace.get_work_area_for_monitor(win.get_monitor());
+    const rect = win.get_frame_rect();
 
     // "null" → normalized to null
     const nx = this._normalizeNullable(x);
