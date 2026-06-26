@@ -13,3 +13,4 @@
 - Next: Upload the ZIP to extensions.gnome.org and respond to any review feedback.
 - Follow-up: Ran `shexli` against the ZIP; result was clean with 0 findings, 0 errors, and 0 warnings.
 - Follow-up: Added `AGENTS.md` with the repeatable extensions.gnome.org packaging and validation process.
+- Follow-up: Uploaded package entered review; expected public URL is `https://extensions.gnome.org/extension/10292/active-window-layout/`.
