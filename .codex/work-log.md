@@ -21,3 +21,8 @@
 - Why: Address GNOME Extensions review feedback requiring extension D-Bus interfaces to start with `org.gnome.Shell.Extensions`, while preserving uniqueness with the author namespace.
 - Incomplete: Local external callers such as xremap key bindings still need to be updated outside this repository.
 - Next: Update local xremap configuration and rebuild the extensions.gnome.org ZIP after the remaining review feedback is handled.
+- Follow-up: Created two separate commits for review feedback: `ffe5d23 Fix enable method indentation` and `ea3bd96 Use GNOME extension D-Bus namespace`.
+- Follow-up: Planned runtime verification after reboot: first confirm the existing xremap binding fails with the old D-Bus name, then update `/home/shibata/.xremap/keymap.yml`, restart xremap, and confirm the binding works with the new D-Bus name.
+- Follow-up: After reboot, confirmed the existing xremap binding no longer works with the old D-Bus name, as expected.
+- Follow-up: Updated `/home/shibata/.xremap/keymap.yml` to the new D-Bus name/object path and restarted `xremap`; `systemctl --user is-active xremap` reports `active`.
+- Follow-up: Confirmed the updated xremap bindings work with the new D-Bus name.
