@@ -26,3 +26,4 @@
 - Follow-up: After reboot, confirmed the existing xremap binding no longer works with the old D-Bus name, as expected.
 - Follow-up: Updated `/home/shibata/.xremap/keymap.yml` to the new D-Bus name/object path and restarted `xremap`; `systemctl --user is-active xremap` reports `active`.
 - Follow-up: Confirmed the updated xremap bindings work with the new D-Bus name.
+- Follow-up: Prepared the review-feedback release as `0.2.0` in `CHANGELOG.md` and added `version: 2` to `metadata.json` for the next extensions.gnome.org upload.
