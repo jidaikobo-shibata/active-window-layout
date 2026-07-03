@@ -30,3 +30,6 @@
 - Follow-up: Built `/tmp/active-window-layout@jidaikobo.shibata.shell-extension.zip` for `version: 2`; ZIP contains only `metadata.json`, `LICENSE`, and `extension.js`.
 - Follow-up: Verified `metadata.json`, `unzip -t`, and `shexli`; `shexli` was clean after pinning `/tmp/shexli-venv` to `tree-sitter==0.25.2` because `tree-sitter 0.26.0` crashed with exit code 139.
 - Follow-up: SHA-256 is `029ad78006f5478852b93672080f9c80d6281949c16bf53fe18021ca3eefab98`.
+- Follow-up: Prepared `version: 3` / `0.2.1` to re-upload the approved extension with `extension.js` reformatted to 4-space indentation for GNOME Shell extension review consistency.
+- Follow-up: Rebuilt `/tmp/active-window-layout@jidaikobo.shibata.shell-extension.zip` for `version: 3`; ZIP contains only `metadata.json`, `LICENSE`, and `extension.js`, ZIP `extension.js` shows 4-space indentation at `enable()`, `unzip -t` passed, and `shexli` was clean.
+- Follow-up: Version 3 SHA-256 is `2a82fe87fd279208a5ff57578cb49843eca50de94f8cdad0549f7a54d1c6d19e`.

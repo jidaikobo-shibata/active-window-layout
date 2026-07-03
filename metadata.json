@@ -2,7 +2,7 @@
   "uuid": "active-window-layout@jidaikobo.shibata",
   "name": "Active Window Layout",
   "description": "Provides a D-Bus API to move and resize the active window within the Work Area, intended for keyboard-driven workflows and external automation.",
-  "version": 2,
+  "version": 3,
   "shell-version": ["45", "46", "50"],
   "url": "https://github.com/jidaikobo-shibata/active-window-layout"
 }

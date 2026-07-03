@@ -1,3 +1,8 @@
+## 0.2.1
+
+- Changed `extension.js` indentation to 4 spaces for GNOME Shell extension review consistency.
+- Added `version: 3` metadata for the next extensions.gnome.org package.
+
 ## 0.2.0
 
 - BREAKING: Changed the D-Bus interface name, bus name, and object path to the `org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout` namespace for GNOME Extensions review compliance.
