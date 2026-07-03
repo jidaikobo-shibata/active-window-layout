@@ -270,18 +270,18 @@ class ServiceImpl {
 }
 
 export default class MyDbusExtension extends Extension {
-enable() {
-  this._impl = new ServiceImpl();
-  this._dbusObj = Gio.DBusExportedObject.wrapJSObject(IFACE_XML, this._impl);
-  this._dbusObj.export(Gio.DBus.session, OBJECT_PATH);
-  this._nameOwnerId = Gio.bus_own_name_on_connection(
-    Gio.DBus.session,
-    BUS_NAME,
-    Gio.BusNameOwnerFlags.NONE,
-    null,
-    null
-  );
-}
+  enable() {
+    this._impl = new ServiceImpl();
+    this._dbusObj = Gio.DBusExportedObject.wrapJSObject(IFACE_XML, this._impl);
+    this._dbusObj.export(Gio.DBus.session, OBJECT_PATH);
+    this._nameOwnerId = Gio.bus_own_name_on_connection(
+      Gio.DBus.session,
+      BUS_NAME,
+      Gio.BusNameOwnerFlags.NONE,
+      null,
+      null
+    );
+  }
 
   disable() {
     if (this._nameOwnerId) {
