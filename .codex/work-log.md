@@ -27,3 +27,6 @@
 - Follow-up: Updated `/home/shibata/.xremap/keymap.yml` to the new D-Bus name/object path and restarted `xremap`; `systemctl --user is-active xremap` reports `active`.
 - Follow-up: Confirmed the updated xremap bindings work with the new D-Bus name.
 - Follow-up: Prepared the review-feedback release as `0.2.0` in `CHANGELOG.md` and added `version: 2` to `metadata.json` for the next extensions.gnome.org upload.
+- Follow-up: Built `/tmp/active-window-layout@jidaikobo.shibata.shell-extension.zip` for `version: 2`; ZIP contains only `metadata.json`, `LICENSE`, and `extension.js`.
+- Follow-up: Verified `metadata.json`, `unzip -t`, and `shexli`; `shexli` was clean after pinning `/tmp/shexli-venv` to `tree-sitter==0.25.2` because `tree-sitter 0.26.0` crashed with exit code 139.
+- Follow-up: SHA-256 is `029ad78006f5478852b93672080f9c80d6281949c16bf53fe18021ca3eefab98`.
