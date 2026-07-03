@@ -14,3 +14,10 @@
 - Follow-up: Ran `shexli` against the ZIP; result was clean with 0 findings, 0 errors, and 0 warnings.
 - Follow-up: Added `AGENTS.md` with the repeatable extensions.gnome.org packaging and validation process.
 - Follow-up: Uploaded package entered review; expected public URL is `https://extensions.gnome.org/extension/10292/active-window-layout/`.
+
+## 2026-07-03
+
+- Did: Updated the public D-Bus interface name, bus name, object path, and README examples to use the `org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout` namespace.
+- Why: Address GNOME Extensions review feedback requiring extension D-Bus interfaces to start with `org.gnome.Shell.Extensions`, while preserving uniqueness with the author namespace.
+- Incomplete: Local external callers such as xremap key bindings still need to be updated outside this repository.
+- Next: Update local xremap configuration and rebuild the extensions.gnome.org ZIP after the remaining review feedback is handled.

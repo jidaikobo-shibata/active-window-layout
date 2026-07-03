@@ -5,7 +5,7 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 // D-Bus Introspection XML
 const IFACE_XML = `
 <node>
-  <interface name="org.jidaikobo.shibata.ActiveWindowLayout">
+  <interface name="org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout">
     <method name="GetWorkArea">
       <arg type="i" name="x" direction="out"/>
       <arg type="i" name="y" direction="out"/>
@@ -49,8 +49,8 @@ const IFACE_XML = `
 </node>`;
 
 // 公開する well-known name と object path
-const BUS_NAME = 'org.jidaikobo.shibata.ActiveWindowLayout';
-const OBJECT_PATH = '/org/jidaikobo/shibata/ActiveWindowLayout';
+const BUS_NAME = 'org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout';
+const OBJECT_PATH = '/org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout';
 
 class ServiceImpl {
   // Get the current window

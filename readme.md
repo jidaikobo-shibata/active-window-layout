@@ -48,19 +48,19 @@ Directly controlling windows from scripts or key remappers often leads to:
 ### Service Name
 
 ```
-org.jidaikobo.shibata.ActiveWindowLayout
+org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout
 ```
 
 ### Object Path
 
 ```
-/org/jidaikobo/shibata/ActiveWindowLayout
+/org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout
 ```
 
 ### Interface
 
 ```
-org.jidaikobo.shibata.ActiveWindowLayout
+org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout
 ```
 
 ## Provided Methods
@@ -99,9 +99,9 @@ Moves the active window to the specified monitor index.
 
 ```bash
 gdbus call --session \
-  --dest org.jidaikobo.shibata.ActiveWindowLayout \
-  --object-path /org/jidaikobo/shibata/ActiveWindowLayout \
-  --method org.jidaikobo.shibata.ActiveWindowLayout.MoveInWorkArea \
+  --dest org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout \
+  --object-path /org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout \
+  --method org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout.MoveInWorkArea \
   0 0
 ```
 
@@ -109,9 +109,9 @@ gdbus call --session \
 
 ```bash
 gdbus call --session \
-  --dest org.jidaikobo.shibata.ActiveWindowLayout \
-  --object-path /org/jidaikobo/shibata/ActiveWindowLayout \
-  --method org.jidaikobo.shibata.ActiveWindowLayout.ResizeInWorkArea \
+  --dest org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout \
+  --object-path /org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout \
+  --method org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout.ResizeInWorkArea \
   1200 600
 ```
 
@@ -119,9 +119,9 @@ gdbus call --session \
 
 ```bash
 gdbus call --session \
-  --dest org.jidaikobo.shibata.ActiveWindowLayout \
-  --object-path /org/jidaikobo/shibata/ActiveWindowLayout \
-  --method org.jidaikobo.shibata.ActiveWindowLayout.MoveResizeInWorkArea \
+  --dest org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout \
+  --object-path /org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout \
+  --method org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout.MoveResizeInWorkArea \
   100 50 1000 700
 ```
 
@@ -131,9 +131,9 @@ Center the window at 60% × 60% of the Work Area:
 
 ```bash
 gdbus call --session \
-  --dest org.jidaikobo.shibata.ActiveWindowLayout \
-  --object-path /org/jidaikobo/shibata/ActiveWindowLayout \
-  --method org.jidaikobo.shibata.ActiveWindowLayout.MoveResizeSemantic \
+  --dest org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout \
+  --object-path /org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout \
+  --method org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout.MoveResizeSemantic \
   center middle 60% 60%
 ```
 
@@ -141,9 +141,9 @@ Right-align the window while keeping its current size:
 
 ```bash
 gdbus call --session \
-  --dest org.jidaikobo.shibata.ActiveWindowLayout \
-  --object-path /org/jidaikobo/shibata/ActiveWindowLayout \
-  --method org.jidaikobo.shibata.ActiveWindowLayout.MoveResizeSemantic \
+  --dest org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout \
+  --object-path /org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout \
+  --method org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout.MoveResizeSemantic \
   right middle null null
 ```
 
@@ -151,9 +151,9 @@ Resize the window to half the Work Area width without moving it:
 
 ```bash
 gdbus call --session \
-  --dest org.jidaikobo.shibata.ActiveWindowLayout \
-  --object-path /org/jidaikobo/shibata/ActiveWindowLayout \
-  --method org.jidaikobo.shibata.ActiveWindowLayout.MoveResizeSemantic \
+  --dest org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout \
+  --object-path /org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout \
+  --method org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout.MoveResizeSemantic \
   null null 50% null
 ```
 
@@ -247,7 +247,7 @@ The following example moves the active window to the top-left of the Work Area a
 keymap:
   - name: resize sample
     remap:
-      Shift-Ctrl-w: {launch: ['gdbus', 'call', '--session', '--dest', 'org.jidaikobo.shibata.ActiveWindowLayout', '--object-path', '/org/jidaikobo/shibata/ActiveWindowLayout', '--method', 'org.jidaikobo.shibata.ActiveWindowLayout.MoveResizeSemantic', 'left', 'top', '1000', '800']}
+      Shift-Ctrl-w: {launch: ['gdbus', 'call', '--session', '--dest', 'org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout', '--object-path', '/org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout', '--method', 'org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout.MoveResizeSemantic', 'left', 'top', '1000', '800']}
 ```
 
 ## License
