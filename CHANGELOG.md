@@ -1,3 +1,7 @@
+## Unreleased
+
+- Fixed maximized window move/resize on GNOME Shell 50 by using the current maximization API, while preserving GNOME Shell 45/46 support.
+
 ## 0.2.1
 
 - Changed `extension.js` indentation to 4 spaces for GNOME Shell extension review consistency.

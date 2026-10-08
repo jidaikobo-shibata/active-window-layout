@@ -63,8 +63,17 @@ class ServiceImpl {
     // Tile (snap) mode can be restrictive, so disable it.
     // Check for existence of methods, as they may not be available depending on the environment.
     _ensureResizableMovable(win) {
-        if (win.get_maximized && win.get_maximized() !== 0)
-            win.unmaximize(Meta.MaximizeFlags.BOTH);
+        if (typeof win.get_maximized === 'function') {
+            // GNOME Shell 45/46: unmaximize takes direction flags.
+            if (win.get_maximized() !== 0)
+                win.unmaximize(Meta.MaximizeFlags.BOTH);
+        } else if (typeof win.get_maximize_flags === 'function') {
+            // GNOME Shell 50: also handle maximization on just one axis.
+            if (win.get_maximize_flags() !== 0)
+                win.unmaximize();
+        } else if (typeof win.is_maximized === 'function' && win.is_maximized()) {
+            win.unmaximize();
+        }
 
         if (typeof win.untile === 'function')
             win.untile();
