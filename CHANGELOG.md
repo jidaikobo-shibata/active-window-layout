@@ -1,5 +1,7 @@
 ## Unreleased
 
+- Corrected semantic window positioning using the actual size accepted by the application, including delayed Wayland position updates. Pending corrections stop on new layout commands, interactive moves/resizes, window closure, or after 1500 ms.
+
 - Fixed maximized window move/resize on GNOME Shell 50 by using the current maximization API, while preserving GNOME Shell 45/46 support.
 
 ## 0.2.1

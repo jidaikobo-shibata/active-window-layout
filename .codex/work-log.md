@@ -33,3 +33,14 @@
 - Follow-up: Prepared `version: 3` / `0.2.1` to re-upload the approved extension with `extension.js` reformatted to 4-space indentation for GNOME Shell extension review consistency.
 - Follow-up: Rebuilt `/tmp/active-window-layout@jidaikobo.shibata.shell-extension.zip` for `version: 3`; ZIP contains only `metadata.json`, `LICENSE`, and `extension.js`, ZIP `extension.js` shows 4-space indentation at `enable()`, `unzip -t` passed, and `shexli` was clean.
 - Follow-up: Version 3 SHA-256 is `2a82fe87fd279208a5ff57578cb49843eca50de94f8cdad0549f7a54d1c6d19e`.
+
+
+## 2026-10-17: Correct semantic placement after client resizing
+
+- Did: Added bounded, per-window semantic position correction based on the actual frame size. Watch size and position changes to handle rounded client sizes and delayed Wayland configure acknowledgements. Move without requesting another resize.
+- Why: Calculating right/center/bottom positions from the requested size left gaps when an application accepted a different size.
+- Lifecycle: Cancel on newer layout commands, interactive grab operations, closure, workspace/work-area changes, incompatible window state, or the 1500 ms deadline. Disconnect signals and remove GLib sources on disable.
+- Validation: All 27 Node tests passed. Syntax check passed. A separate GNOME Shell 50.1 Wayland session with two virtual monitors and Emacs confirmed right/top, center/bottom, and percentage placement when 1103px was requested but the actual width was 1100px. Timeout cleanup passed.
+- Runtime: The user rebooted and confirmed the installed change works with the existing xremap binding.
+- Incomplete: GNOME Shell 45/46 hardware testing remains unperformed. Responses arriving after the 1500 ms correction period are outside its scope.
+- Next: Package for extensions.gnome.org when requested. This change does not bump metadata or create a release package.

@@ -1,4 +1,5 @@
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
@@ -51,8 +52,103 @@ const IFACE_XML = `
 // 公開する well-known name と object path
 const BUS_NAME = 'org.gnome.Shell.Extensions.jidaikobo.shibata.ActiveWindowLayout';
 const OBJECT_PATH = '/org/gnome/Shell/Extensions/jidaikobo/shibata/ActiveWindowLayout';
+const PLACEMENT_TIMEOUT_MS = 1500;
 
 class ServiceImpl {
+    constructor() {
+        this._placements = new Map();
+        this._grabBeginId = global.display.connect('grab-op-begin', (_display, win) => {
+            this._cancelPlacement(win);
+        });
+        this._workAreasChangedId = global.display.connect('workareas-changed', () => {
+            this._cancelAllPlacements();
+        });
+    }
+
+    destroy() {
+        this._cancelAllPlacements();
+        global.display.disconnect(this._grabBeginId);
+        global.display.disconnect(this._workAreasChangedId);
+    }
+
+    _cancelAllPlacements() {
+        for (const win of this._placements.keys())
+            this._cancelPlacement(win);
+    }
+
+    _cancelPlacement(win) {
+        const pending = this._placements.get(win);
+        if (!pending)
+            return;
+
+        this._placements.delete(win);
+        if (pending.idleId)
+            GLib.Source.remove(pending.idleId);
+        if (pending.timeoutId)
+            GLib.Source.remove(pending.timeoutId);
+        for (const id of pending.signalIds)
+            win.disconnect(id);
+    }
+
+    _isMaximized(win) {
+        if (typeof win.get_maximized === 'function')
+            return win.get_maximized() !== 0;
+        if (typeof win.get_maximize_flags === 'function')
+            return win.get_maximize_flags() !== 0;
+        return win.is_maximized();
+    }
+
+    _watchSemanticPlacement(win, x, y) {
+        // Numeric coordinates and left/top don't depend on the resulting size.
+        const dependsOnSize = value => typeof value === 'string' &&
+            value !== 'left' && value !== 'top';
+        if (!dependsOnSize(x) && !dependsOnSize(y))
+            return;
+
+        const monitor = win.get_monitor();
+        const workspace = global.workspace_manager.get_active_workspace();
+        const pending = {idleId: 0, timeoutId: 0, signalIds: []};
+        this._placements.set(win, pending);
+
+        const queueCorrection = () => {
+            if (pending.idleId)
+                return;
+            pending.idleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                pending.idleId = 0;
+                if (win.get_monitor() !== monitor ||
+                    global.workspace_manager.get_active_workspace() !== workspace ||
+                    win.is_fullscreen() || this._isMaximized(win)) {
+                    this._cancelPlacement(win);
+                    return GLib.SOURCE_REMOVE;
+                }
+
+                const wa = workspace.get_work_area_for_monitor(monitor);
+                const rect = win.get_frame_rect();
+                const px = x === null ? rect.x : wa.x + this._resolvePos(x, wa.width, rect.width);
+                const py = y === null ? rect.y : wa.y + this._resolvePos(y, wa.height, rect.height);
+                // Only move: requesting the size again can trigger another rounding.
+                if (px !== rect.x || py !== rect.y)
+                    win.move_frame(true, px, py);
+                return GLib.SOURCE_REMOVE;
+            });
+        };
+
+        // Connect before requesting a resize, including synchronous size changes.
+        pending.signalIds.push(win.connect('size-changed', queueCorrection));
+        // A delayed Wayland configure can restore the requested position without
+        // changing size again. Recheck that position too, until the deadline.
+        pending.signalIds.push(win.connect('position-changed', queueCorrection));
+        pending.signalIds.push(win.connect('unmanaged', () => this._cancelPlacement(win)));
+        pending.signalIds.push(win.connect('workspace-changed', () => this._cancelPlacement(win)));
+        pending.timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, PLACEMENT_TIMEOUT_MS, () => {
+            pending.timeoutId = 0;
+            this._cancelPlacement(win);
+            return GLib.SOURCE_REMOVE;
+        });
+        // Also cover a refused resize or an already matching size (no signal).
+        queueCorrection();
+    }
+
     // Get the current window
     _getFocusedWindow() {
         const win = global.display.get_focus_window();
@@ -79,11 +175,15 @@ class ServiceImpl {
             win.untile();
     }
 
-    // Execute move and resize. Due to Mutter's specifications, this must be done in two steps.
-    _applyMoveResizeInWorkArea(win, dx, dy, width = null, height = null) {
+    // Keep the existing two-step move/resize request; semantic placement is
+    // corrected separately once the client has applied its size constraints.
+    _applyMoveResizeInWorkArea(win, dx, dy, width = null, height = null, semantic = null) {
+        this._cancelPlacement(win);
         const workspace = global.workspace_manager.get_active_workspace();
         const wa = workspace.get_work_area_for_monitor(win.get_monitor());
 
+        if (semantic)
+            this._watchSemanticPlacement(win, semantic.x, semantic.y);
         this._ensureResizableMovable(win);
 
         const rect = win.get_frame_rect();
@@ -244,6 +344,7 @@ class ServiceImpl {
         if (monitor < 0 || monitor >= n)
             return false;
 
+        this._cancelPlacement(win);
         win.move_to_monitor(monitor);
         return true;
     }
@@ -268,11 +369,11 @@ class ServiceImpl {
         const pw = nw !== null ? this._resolveSize(nw, wa.width) : rect.width;
         const ph = nh !== null ? this._resolveSize(nh, wa.height) : rect.height;
 
-        // 2. Position is resolved using "final size"
+        // 2. Use the requested size initially, then correct using the actual size.
         const px = nx !== null ? this._resolvePos(nx, wa.width, pw) : null;
         const py = ny !== null ? this._resolvePos(ny, wa.height, ph) : null;
 
-        this._applyMoveResizeInWorkArea(win, px, py, pw, ph);
+        this._applyMoveResizeInWorkArea(win, px, py, pw, ph, {x: nx, y: ny});
         return true;
     }
 
@@ -293,6 +394,7 @@ export default class MyDbusExtension extends Extension {
     }
 
     disable() {
+        this._impl?.destroy();
         if (this._nameOwnerId) {
             Gio.bus_unown_name(this._nameOwnerId);
             this._nameOwnerId = 0;
