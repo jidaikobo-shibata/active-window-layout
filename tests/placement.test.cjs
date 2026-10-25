@@ -4,6 +4,11 @@ const {readFileSync} = require('node:fs');
 const {test} = require('node:test');
 const vm = require('node:vm');
 
+const layoutSource = readFileSync(`${__dirname}/../layout.js`, 'utf8').replace(/^export /gm, '');
+const historySource = readFileSync(`${__dirname}/../history.js`, 'utf8').replace(/^export /gm, '');
+const layoutContext = {};
+vm.runInNewContext(`${layoutSource}\nthis.api = {MAX_WINDOWS, parseRules, parseArrangement, planActive, planLayout, matchesActive, matchesLayout, sameRect};`, layoutContext);
+
 const source = readFileSync(`${__dirname}/../extension.js`, 'utf8')
     .replace(/^import .*;\n/gm, '')
     .replace('export default class', 'class');
@@ -27,7 +32,7 @@ class Signals {
     }
 }
 
-function fixture({synchronous = false, refuse = false, rect = {}} = {}) {
+function fixture({synchronous = false, refuse = false, rounding = true, rect = {}} = {}) {
     let now = 0;
     let nextId = 1;
     const sources = new Map();
@@ -74,6 +79,11 @@ function fixture({synchronous = false, refuse = false, rect = {}} = {}) {
         get_maximized() { return this.maximized; },
         is_fullscreen() { return this.fullscreen; },
         unmaximize() { this.maximized = 0; },
+        maximize(flags = 3) { this.maximized = flags; },
+        unmake_fullscreen() { this.fullscreen = false; },
+        make_fullscreen() { this.fullscreen = true; },
+        get_workspace: () => workspace,
+        raise() {},
         move_to_monitor(monitor) { this.monitor = monitor; },
         move_frame(_userOp, x, y) {
             this.moves.push({x, y});
@@ -87,7 +97,7 @@ function fixture({synchronous = false, refuse = false, rect = {}} = {}) {
                 return;
             const commit = () => {
                 // A client rounds the requested size down by 9px/7px.
-                this.commitSize(width - 9, height - 7);
+                this.commitSize(width - (rounding ? 9 : 0), height - (rounding ? 7 : 0));
                 return false;
             };
             if (synchronous)
@@ -103,6 +113,7 @@ function fixture({synchronous = false, refuse = false, rect = {}} = {}) {
     const display = new Signals();
     display.get_focus_window = () => win;
     display.get_n_monitors = () => 2;
+    display.sort_windows_by_stacking = windows => [...windows];
     const app = {get_windows: () => [win]};
     Object.assign(win, {
         get_window_type: () => 0,
@@ -114,14 +125,14 @@ function fixture({synchronous = false, refuse = false, rect = {}} = {}) {
     });
     const tracker = {get_window_app: () => app};
     const context = {
-        GLib, Gio: {}, Meta: {MaximizeFlags: {BOTH: 3}, WindowType: {NORMAL: 0}},
+        Layout: layoutContext.api, GLib, Gio: {}, Meta: {MaximizeFlags: {BOTH: 3}, WindowType: {NORMAL: 0}},
         Shell: {WindowTracker: {get_default: () => tracker}}, Extension: class {},
         global: {
             display,
             workspace_manager: {get_active_workspace: () => activeWorkspace},
         },
     };
-    vm.runInNewContext(`${source}\nthis.Service = ServiceImpl;`, context);
+    vm.runInNewContext(`${historySource}\n${source}\nthis.Service = ServiceImpl;`, context);
     const service = new context.Service();
     return {
         service, win, display, wa, sources, advance, app, tracker,
@@ -202,7 +213,7 @@ test('left/top and numeric coordinates need no size-dependent correction', () =>
         f.advance(50);
         assert.equal(f.win.rect.x, f.wa.x + (x === 'left' ? 0 : 100));
         assert.equal(f.win.rect.y, f.wa.y + (y === 'top' ? 0 : 200));
-        assert.equal(f.win.handlers.size, 0);
+        assert.equal(f.service._placements.size, 0);
         f.cleanup();
     }
 });
@@ -225,7 +236,7 @@ for (const [name, cancel] of Object.entries(cancellations)) {
         cancel(f);
         f.advance(50);
         assert.equal(f.win.moves.length, 0);
-        assert.equal(f.win.handlers.size, 0);
+        assert.equal(f.service._placements.size, 0);
         f.cleanup();
     });
 }
@@ -242,7 +253,7 @@ for (const [name, change] of Object.entries({
         change(f);
         f.advance(50);
         assert.equal(f.win.moves.length, 0);
-        assert.equal(f.win.handlers.size, 0);
+        assert.equal(f.service._placements.size, 0);
         f.cleanup();
     });
 }
@@ -251,7 +262,7 @@ test('watching expires even when the client never settles', () => {
     const f = fixture();
     f.service.MoveResizeSemantic('right', 'top', '1100', '95%');
     f.advance(1600);
-    assert.equal(f.win.handlers.size, 0);
+    assert.equal(f.service._placements.size, 0);
     assert.equal(f.sources.size, 0);
     const count = f.win.moves.length;
     f.win.commitSize(1000, 800);
@@ -264,7 +275,7 @@ test('destroy removes pending callbacks before a delayed client response', () =>
     const f = fixture();
     f.service.MoveResizeSemantic('right', 'top', '1100', '95%');
     f.service.destroy();
-    assert.equal(f.win.handlers.size, 0);
+    assert.equal(f.service._placements.size, 0);
     assert.equal(f.display.handlers.size, 0);
     f.advance(2000);
     assert.equal(f.win.moves.length, 0);
@@ -281,9 +292,16 @@ test('GNOME 50 maximization API is supported', () => {
     f.cleanup();
 });
 
+function activeRules(rules) {
+    return JSON.stringify({rules: rules.map(rule => ({
+        ...(rule.when ? {when: {target: 'active', ...rule.when}} : {}),
+        then: {target: 'active', ...rule.then},
+    }))});
+}
+
 test('conditional placement cycles through three sizes using actual rounded dimensions', () => {
     const f = fixture();
-    const rules = JSON.stringify([
+    const rules = activeRules([
         {when: {width: 1000}, then: {x: 'center', y: 'center', width: 1200, height: 700}},
         {when: {width: 1200}, then: {x: 'center', y: 'center', width: 1400, height: 700}},
         {then: {x: 'center', y: 'center', width: 1000, height: 700}},
@@ -301,7 +319,7 @@ test('conditions use actual size for center and work-area-relative coordinates',
     const f = fixture({rect: {width: 991, height: 693}});
     f.win.rect.x = f.wa.x + Math.floor((f.wa.width - 991) / 2);
     f.win.rect.y = f.wa.y + Math.floor((f.wa.height - 693) / 2);
-    assert.equal(f.service.MoveResizeConditional(JSON.stringify([
+    assert.equal(f.service.MoveResizeConditional(activeRules([
         {when: {x: 'center', y: 'center', width: 1000, height: 700}, then: {width: 1200}},
         {then: {width: 800}},
     ])), true);
@@ -312,11 +330,11 @@ test('conditions use actual size for center and work-area-relative coordinates',
 
 test('no match does nothing; tolerance zero and partial fields are respected', () => {
     const f = fixture();
-    assert.equal(f.service.MoveResizeConditional(JSON.stringify([
+    assert.equal(f.service.MoveResizeConditional(activeRules([
         {when: {width: 801, tolerance: 0}, then: {width: 1000}},
     ])), false);
     assert.equal(f.win.requests.length, 0);
-    f.service.MoveResizeConditional(JSON.stringify([
+    f.service.MoveResizeConditional(activeRules([
         {when: {width: 801, tolerance: 1}, then: {x: null, height: '90%'}},
     ]));
     assert.deepEqual(f.win.requests.at(-1), {x: 2000, y: 80, width: 800, height: 943});
@@ -325,7 +343,7 @@ test('no match does nothing; tolerance zero and partial fields are respected', (
 
 test('first match wins and percentages match work area sizes', () => {
     const f = fixture({rect: {width: 960}});
-    f.service.MoveResizeConditional(JSON.stringify([
+    f.service.MoveResizeConditional(activeRules([
         {when: {width: '50%', tolerance: 0}, then: {x: 'right', width: '75%'}},
         {then: {width: 500}},
     ]));
@@ -338,7 +356,7 @@ test('first match wins and percentages match work area sizes', () => {
 test('two windows of the same application have independent placement', () => {
     const a = fixture();
     const b = fixture();
-    const rules = JSON.stringify([
+    const rules = activeRules([
         {when: {x: 'left', tolerance: 0}, then: {x: 'right'}},
         {then: {x: 'left'}},
     ]);
@@ -369,7 +387,7 @@ test('invalid rules including unreachable rules are rejected before mutation', (
         ' '.repeat(65537)]) {
         assert.throws(() => f.service.MoveResizeConditional(json));
         assert.equal(f.win.requests.length, 0);
-        assert.equal(f.win.handlers.size, 0);
+        assert.equal(f.service._placements.size, 0);
     }
     f.cleanup();
 });
@@ -377,12 +395,12 @@ test('invalid rules including unreachable rules are rejected before mutation', (
 test('no focused window returns false', () => {
     const f = fixture();
     f.display.get_focus_window = () => null;
-    assert.equal(f.service.MoveResizeConditional('[{"then":{"width":1000}}]'), false);
+    assert.equal(f.service.MoveResizeConditional(activeRules([{then: {width: 1000}}])), false);
     f.cleanup();
 });
 
-function arrangementFixture(count) {
-    const f = fixture({refuse: true});
+function arrangementFixture(count, options = {}) {
+    const f = fixture({refuse: true, ...options});
     const windows = [f.win];
     for (let i = 1; i < count; i++) {
         const win = Object.assign(new Signals(), f.win);
@@ -474,7 +492,7 @@ test('ArrangeSameApp cancels prior semantic corrections and unmaximizes windows'
     f.win.maximized = 3;
     f.service.ArrangeSameApp('{"gap":0}');
     assert.equal(f.win.maximized, 0);
-    assert.equal(f.win.handlers.size, 0);
+    assert.equal(f.service._placements.size, 0);
     f.advance(50);
     assert.equal(f.win.rect.x, f.wa.x);
     f.cleanup();
@@ -521,4 +539,257 @@ test('cascade validates all options and resolved sizes before moving or raising'
     }
     assert.throws(() => f.service.ArrangeSameApp('{"layout":"grid","width":1000}'));
     f.cleanup();
+});
+
+const ruleSet = rules => JSON.stringify({rules});
+const exact = {refuse: false, synchronous: true, rounding: false};
+
+test('mixed rules cycle active resize, grid and cascade using one history entry per call', () => {
+    const f = arrangementFixture(3, exact);
+    const initial = f.windows.map(win => ({...win.rect}));
+    const rules = ruleSet([
+        {when: {target: 'same-app', layout: 'grid'}, then: {target: 'same-app', layout: 'cascade'}},
+        {when: {target: 'active', width: 1000, height: 700}, then: {target: 'same-app', layout: 'grid'}},
+        {then: {target: 'active', x: 'center', y: 'center', width: 1000, height: 700}},
+    ]);
+    f.service.MoveResizeConditional(rules);
+    f.advance(50);
+    assert.equal(f.win.rect.width, 1000);
+    assert.equal(f.windows[1].requests.length, 0);
+    const resized = f.windows.map(win => ({...win.rect}));
+    f.service.MoveResizeConditional(rules);
+    f.advance(50);
+    assert.equal(f.win.rect.width, 954);
+    const grid = f.windows.map(win => ({...win.rect}));
+    f.service.MoveResizeConditional(rules);
+    f.advance(50);
+    assert.equal(f.win.rect.width, 1344);
+    assert.equal(f.service._history.size, 3);
+    for (const expected of [grid, resized, initial]) {
+        assert.equal(f.service.UndoLastOperation(), true);
+        f.advance(50);
+        assert.deepEqual(f.windows.map(win => win.rect), expected);
+    }
+    assert.equal(f.service.UndoLastOperation(), false);
+    f.cleanup();
+});
+
+test('layout matching ignores focus and cell ownership but requires every cell once', () => {
+    const f = arrangementFixture(3, exact);
+    f.service.ArrangeSameApp('{}');
+    f.advance(50);
+    f.display.get_focus_window = () => f.windows[2];
+    const rules = ruleSet([
+        {when: {target: 'same-app', layout: 'grid'}, then: {target: 'same-app', layout: 'cascade'}},
+    ]);
+    assert.equal(f.service.MoveResizeConditional(rules), true);
+    f.advance(50);
+    assert.equal(f.windows[2].rect.width, 1344);
+    f.service.ArrangeSameApp('{}');
+    f.advance(50);
+    f.windows[1].rect = {...f.windows[0].rect};
+    const historyCount = f.service._history.size;
+    assert.equal(f.service.MoveResizeConditional(rules), false);
+    assert.equal(f.service._history.size, historyCount);
+    f.cleanup();
+});
+
+test('layout matching uses one-to-one augmenting paths for overlapping tolerance ranges', () => {
+    const rect = x => ({x, y: 0, width: 100, height: 100});
+    assert.equal(layoutContext.api.matchesLayout([rect(5), rect(0)], [rect(0), rect(10)], 5), true);
+    assert.equal(layoutContext.api.matchesLayout([rect(0), rect(0)], [rect(0), rect(10)], 1), false);
+});
+
+test('rounded grid dimensions match with tolerance and cascade itself is a condition', () => {
+    const f = arrangementFixture(2, {refuse: false, synchronous: true});
+    f.service.ArrangeSameApp('{}');
+    f.advance(50);
+    const rules = ruleSet([
+        {when: {target: 'same-app', layout: 'grid'}, then: {target: 'same-app', layout: 'cascade'}},
+        {when: {target: 'same-app', layout: 'cascade'}, then: {target: 'same-app', layout: 'rows'}},
+    ]);
+    assert.equal(f.service.MoveResizeConditional(rules), true);
+    f.advance(50);
+    assert.equal(f.win.rect.width, 1344 - 9);
+    assert.equal(f.service.MoveResizeConditional(rules), true);
+    assert.equal(f.win.requests.at(-1).width, 1920);
+    f.cleanup();
+});
+
+test('manual move or a new window causes a layout condition to stop matching', () => {
+    const f = arrangementFixture(3, exact);
+    const windows = f.windows;
+    f.app.get_windows = () => windows.slice(0, 2);
+    f.service.ArrangeSameApp('{}');
+    f.advance(50);
+    const rules = ruleSet([{when: {target: 'same-app', layout: 'grid'},
+        then: {target: 'active', width: 1000}}]);
+    windows[1].rect.x += 100;
+    assert.equal(f.service.MoveResizeConditional(rules), false);
+    windows[1].rect.x -= 100;
+    f.app.get_windows = () => windows;
+    assert.equal(f.service.MoveResizeConditional(rules), false);
+    f.cleanup();
+});
+
+test('new schema rejects unreachable malformed rules and old array syntax before mutation', () => {
+    const f = fixture();
+    const good = {then: {target: 'active', width: 1000}};
+    for (const bad of [
+        {then: {target: 'active', width: 0}},
+        {when: {target: 'same-app', layout: 'unknown'}, then: good.then},
+        {then: {target: 'same-app', layout: 'grid', x: 10}},
+        {then: {target: 'same-app', layout: 'cascade', offsetY: null}},
+        {then: {target: 'active', width: '50.5%'}},
+        {then: {target: 'other', width: 1000}},
+        {then: {target: 'active', width: 1e100}},
+        {when: {target: 'active', width: null}, then: good.then},
+        {then: {target: 'active', width: 1000, tolerance: 20}},
+        {when: {target: 'active', width: 1000, tolerance: -1}, then: good.then},
+        {when: {}, then: good.then},
+    ]) {
+        assert.throws(() => f.service.MoveResizeConditional(ruleSet([good, bad])));
+        assert.equal(f.service._history.size, 0);
+        assert.equal(f.win.requests.length, 0);
+    }
+    for (const invalid of [JSON.stringify([good]), ruleSet([]),
+        JSON.stringify({rules: [good], scope: 'all'}),
+        JSON.stringify({rules: [good], tolerance: null}), ruleSet(Array(101).fill(good))])
+        assert.throws(() => f.service.MoveResizeConditional(invalid));
+    f.cleanup();
+});
+
+test('invalid resolved action is rejected without history; nonfitting condition can fall through', () => {
+    const f = arrangementFixture(2, exact);
+    assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'same-app', layout: 'cascade', width: 9999}},
+    ])));
+    assert.equal(f.service._history.size, 0);
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {when: {target: 'same-app', layout: 'cascade', width: 9999},
+            then: {target: 'active', width: 900}},
+        {then: {target: 'active', width: 1000}},
+    ])), true);
+    assert.equal(f.win.rect.width, 1000);
+    f.cleanup();
+});
+
+test('active-only rules work without an app identity and no-op does not consume history', () => {
+    const f = fixture(exact);
+    f.tracker.get_window_app = () => null;
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', x: null}},
+    ])), false);
+    assert.equal(f.service._history.size, 0);
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', width: 1000}},
+    ])), true);
+    assert.equal(f.win.rect.width, 1000);
+    f.cleanup();
+});
+
+test('undo closes over original targets even after focus changes and removes closed windows', () => {
+    const f = arrangementFixture(3, exact);
+    const originals = f.windows.map(win => ({...win.rect}));
+    f.service.ArrangeSameApp('{}');
+    f.advance(50);
+    f.windows[1].emit('unmanaged');
+    const closedRequestCount = f.windows[1].requests.length;
+    f.display.get_focus_window = () => null;
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    assert.deepEqual(f.win.rect, originals[0]);
+    assert.deepEqual(f.windows[2].rect, originals[2]);
+    assert.equal(f.windows[1].requests.length, closedRequestCount);
+    assert.equal(f.windows[1].handlers.size, 0);
+    f.cleanup();
+});
+
+test('history is bounded to 20 operations, LIFO and cleared on work area change', () => {
+    const f = fixture(exact);
+    for (let i = 0; i < 25; i++)
+        f.service.ResizeInWorkArea(1000 + i, 700);
+    assert.equal(f.service._history.size, 20);
+    for (let width = 1023; width >= 1004; width--) {
+        assert.equal(f.service.UndoLastOperation(), true);
+        f.advance(50);
+        assert.equal(f.win.rect.width, width);
+    }
+    assert.equal(f.service.UndoLastOperation(), false);
+    f.service.ResizeInWorkArea(1100, 700);
+    f.display.emit('workareas-changed');
+    assert.equal(f.service.UndoLastOperation(), false);
+    assert.equal(f.win.handlers.size, 0);
+    f.cleanup();
+});
+
+for (const version of ['old', 'new']) {
+    test(`undo restores maximization flags on ${version} GNOME API`, () => {
+        const f = fixture(exact);
+        f.win.maximized = 1;
+        if (version === 'new') {
+            f.win.get_maximize_flags = f.win.get_maximized;
+            delete f.win.get_maximized;
+            f.win.set_maximize_flags = flags => { f.win.maximized = flags; };
+        }
+        f.service.ResizeInWorkArea(1000, 700);
+        assert.equal(f.win.maximized, 0);
+        f.service.UndoLastOperation();
+        assert.equal(f.win.maximized, 1);
+        f.cleanup();
+    });
+}
+
+test('legacy monitor move can be undone and each legacy call is a separate entry', () => {
+    const f = fixture(exact);
+    const original = {...f.win.rect};
+    f.service.MoveToMonitor(0);
+    f.service.MoveResizeSemantic('left', 'top', '1000', '700');
+    assert.equal(f.service._history.size, 2);
+    f.service.UndoLastOperation();
+    assert.equal(f.win.monitor, 0);
+    f.service.UndoLastOperation();
+    f.advance(50);
+    assert.equal(f.win.monitor, 1);
+    assert.deepEqual(f.win.rect, original);
+    f.cleanup();
+});
+
+test('undo cancels semantic correction and corrects delayed position acknowledgement', () => {
+    const f = fixture(exact);
+    const original = {...f.win.rect};
+    f.service.MoveResizeSemantic('right', 'bottom', '1100', '700');
+    f.service.UndoLastOperation();
+    f.win.rect.x += 200;
+    f.win.emit('position-changed');
+    f.advance(50);
+    assert.deepEqual(f.win.rect, original);
+    f.cleanup();
+});
+
+test('undo skips windows moved to another workspace and clears closed-only entries', () => {
+    const f = fixture(exact);
+    f.service.ResizeInWorkArea(1000, 700);
+    f.win.get_workspace = () => ({});
+    assert.equal(f.service.UndoLastOperation(), false);
+    assert.equal(f.win.rect.width, 1000);
+    f.service.ResizeInWorkArea(1100, 700);
+    f.win.emit('unmanaged');
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('undo restores target stacking for cascade and destroy disconnects history observers', () => {
+    const f = arrangementFixture(3, exact);
+    const originalStack = [f.windows[2], f.windows[0], f.windows[1]];
+    f.display.sort_windows_by_stacking = () => originalStack;
+    const raised = [];
+    f.windows.forEach(win => { win.raise = () => raised.push(win); });
+    f.service.ArrangeSameApp('{"layout":"cascade"}');
+    raised.length = 0;
+    f.service.UndoLastOperation();
+    assert.deepEqual(raised, originalStack);
+    f.service.ArrangeSameApp('{}');
+    f.cleanup();
+    assert.ok(f.windows.every(win => win.handlers.size === 0));
 });

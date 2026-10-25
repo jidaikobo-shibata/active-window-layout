@@ -2,6 +2,8 @@ import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
+import * as Layout from './layout.js';
+import { OperationHistory } from './history.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // D-Bus Introspection XML
@@ -40,6 +42,10 @@ const IFACE_XML = `
             <arg type="b" name="ok" direction="out"/>
         </method>
 
+        <method name="UndoLastOperation">
+            <arg type="b" name="ok" direction="out"/>
+        </method>
+
         <method name="ArrangeSameApp">
             <arg type="s" name="options" direction="in"/>
             <arg type="b" name="ok" direction="out"/>
@@ -68,16 +74,19 @@ const PLACEMENT_TIMEOUT_MS = 1500;
 class ServiceImpl {
     constructor() {
         this._placements = new Map();
+        this._history = new OperationHistory(20);
         this._grabBeginId = global.display.connect('grab-op-begin', (_display, win) => {
             this._cancelPlacement(win);
         });
         this._workAreasChangedId = global.display.connect('workareas-changed', () => {
             this._cancelAllPlacements();
+            this._history.clear();
         });
     }
 
     destroy() {
         this._cancelAllPlacements();
+        this._history.clear();
         global.display.disconnect(this._grabBeginId);
         global.display.disconnect(this._workAreasChangedId);
     }
@@ -109,11 +118,11 @@ class ServiceImpl {
         return win.is_maximized();
     }
 
-    _watchSemanticPlacement(win, x, y) {
+    _watchSemanticPlacement(win, x, y, force = false) {
         // Numeric coordinates and left/top don't depend on the resulting size.
         const dependsOnSize = value => typeof value === 'string' &&
             value !== 'left' && value !== 'top';
-        if (!dependsOnSize(x) && !dependsOnSize(y))
+        if (!force && !dependsOnSize(x) && !dependsOnSize(y))
             return;
 
         const monitor = win.get_monitor();
@@ -315,7 +324,7 @@ class ServiceImpl {
         if (!win)
             return false;
 
-        this._applyMoveResizeInWorkArea(win, null, null, width, height);
+        this._perform([win], () => this._applyMoveResizeInWorkArea(win, null, null, width, height));
         return true;
     }
 
@@ -325,7 +334,7 @@ class ServiceImpl {
         if (!win)
             return false;
 
-        this._applyMoveResizeInWorkArea(win, x | 0, y | 0);
+        this._perform([win], () => this._applyMoveResizeInWorkArea(win, x | 0, y | 0));
         return true;
     }
 
@@ -335,13 +344,13 @@ class ServiceImpl {
         if (!win)
             return false;
 
-        this._applyMoveResizeInWorkArea(
+        this._perform([win], () => this._applyMoveResizeInWorkArea(
             win,
             x | 0,
             y | 0,
             Math.max(50, width | 0),
             Math.max(50, height | 0)
-        );
+        ));
         return true;
     }
 
@@ -355,217 +364,173 @@ class ServiceImpl {
         if (monitor < 0 || monitor >= n)
             return false;
 
-        this._cancelPlacement(win);
-        win.move_to_monitor(monitor);
+        this._perform([win], () => {
+            this._cancelPlacement(win);
+            win.move_to_monitor(monitor);
+        });
         return true;
     }
 
-    // Arrange visible normal windows without changing focus or workspace.
-    ArrangeSameApp(json) {
-        if (typeof json !== 'string' || json.length > 4096)
-            throw new Error('Options must be a JSON string of at most 4096 characters');
-        const options = JSON.parse(json);
-        if (options === null || typeof options !== 'object' || Array.isArray(options) ||
-            Object.keys(options).some(key => !['scope', 'layout', 'gap', 'width', 'height', 'offsetX', 'offsetY'].includes(key)))
-            throw new Error('Unexpected arrangement options');
-        const {scope = 'current-workspace-monitor', layout = 'grid', gap = 12} = options;
-        if (scope !== 'current-workspace-monitor')
-            throw new Error('Unsupported scope');
-        if (!['grid', 'columns', 'rows', 'cascade'].includes(layout))
-            throw new Error('Unsupported layout');
-        if (!Number.isSafeInteger(gap) || gap < 0 || gap > 4096)
-            throw new Error('Gap must be an integer between 0 and 4096');
+    _rect(win) {
+        const rect = win.get_frame_rect();
+        return {x: rect.x, y: rect.y, width: rect.width, height: rect.height};
+    }
 
-        const cascadeFields = ['width', 'height', 'offsetX', 'offsetY'];
-        if (layout !== 'cascade' && cascadeFields.some(key => Object.hasOwn(options, key)))
-            throw new Error('Size and offsets are only supported for cascade');
-        const {width = '70%', height = '75%', offsetX = 40, offsetY = 40} = options;
-        for (const offset of [offsetX, offsetY]) {
-            if (!Number.isSafeInteger(offset) || offset < 0 || offset > 4096)
-                throw new Error('Offsets must be integers between 0 and 4096');
-        }
-        for (const size of [width, height]) {
-            if (!(Number.isSafeInteger(size) && size >= 50 && size <= 2147483647) &&
-                !(typeof size === 'string' && /^(100|[1-9][0-9]?)%$/.test(size)))
-                throw new Error('Cascade size must be pixels >= 50 or an integer 1% to 100%');
-        }
+    _maximizeFlags(win) {
+        if (typeof win.get_maximized === 'function')
+            return win.get_maximized();
+        if (typeof win.get_maximize_flags === 'function')
+            return win.get_maximize_flags();
+        return win.is_maximized() ? Meta.MaximizeFlags.BOTH : 0;
+    }
 
+    // Capture every target before mutating any of them. A partially failed
+    // operation remains undoable; no automatic rollback races Wayland replies.
+    _perform(windows, execute, restoreStack = false) {
+        const ordered = restoreStack ? global.display.sort_windows_by_stacking(windows) : windows;
+        const states = ordered.map(win => ({
+            win, rect: this._rect(win), monitor: win.get_monitor(),
+            workspace: win.get_workspace(), maximized: this._maximizeFlags(win),
+            fullscreen: win.is_fullscreen(), restoreStack,
+        }));
+        this._history.push(states);
+        execute();
+    }
+
+    UndoLastOperation() {
+        const states = this._history.pop();
+        let restored = false;
+        for (const state of states) {
+            const {win, rect} = state;
+            // Closed windows have already been removed by OperationHistory.
+            // Do not move windows back from a manually selected workspace.
+            if (win.get_workspace() !== state.workspace ||
+                state.monitor < 0 || state.monitor >= global.display.get_n_monitors())
+                continue;
+            this._cancelPlacement(win);
+            if (win.is_fullscreen())
+                win.unmake_fullscreen();
+            this._ensureResizableMovable(win);
+            if (win.get_monitor() !== state.monitor)
+                win.move_to_monitor(state.monitor);
+            if (!state.maximized && !state.fullscreen &&
+                global.workspace_manager.get_active_workspace() === state.workspace) {
+                const wa = state.workspace.get_work_area_for_monitor(state.monitor);
+                this._watchSemanticPlacement(win, rect.x - wa.x, rect.y - wa.y, true);
+            }
+            win.move_resize_frame(true, rect.x, rect.y, rect.width, rect.height);
+            if (state.maximized) {
+                if (typeof win.set_maximize_flags === 'function')
+                    win.set_maximize_flags(state.maximized);
+                else if (typeof win.get_maximized === 'function')
+                    win.maximize(state.maximized);
+                else
+                    win.maximize();
+            }
+            if (state.fullscreen)
+                win.make_fullscreen();
+            if (state.restoreStack)
+                win.raise();
+            restored = true;
+        }
+        return restored;
+    }
+
+    // Resolve targets and read geometry once, before condition evaluation.
+    _context(needsApp) {
         const focused = this._getFocusedWindow();
         if (!focused)
-            return false;
-        const app = Shell.WindowTracker.get_default().get_window_app(focused);
-        if (!app)
-            return false;
+            return null;
         const workspace = global.workspace_manager.get_active_workspace();
         const monitor = focused.get_monitor();
-        const windows = [...new Set(app.get_windows())].filter(win =>
-            win.get_window_type() === Meta.WindowType.NORMAL &&
+        const wa = workspace.get_work_area_for_monitor(monitor);
+        const eligible = win => win.get_window_type() === Meta.WindowType.NORMAL &&
             win.get_transient_for() === null && !win.skip_taskbar &&
             !win.minimized && !win.is_fullscreen() &&
             win.located_on_workspace(workspace) && win.get_monitor() === monitor &&
-            win.allows_move() && win.allows_resize());
-        // Do not arrange other windows when invoked from an excluded dialog etc.
-        if (!windows.includes(focused))
-            return false;
-        windows.sort((a, b) => {
-            if (a === b)
-                return 0;
-            if (a === focused)
-                return -1;
-            if (b === focused)
-                return 1;
-            return a.get_stable_sequence() - b.get_stable_sequence();
-        });
-        const count = windows.length;
-        const wa = workspace.get_work_area_for_monitor(monitor);
-        if (layout === 'cascade') {
-            const pw = this._resolveSize(width, wa.width);
-            const ph = this._resolveSize(height, wa.height);
-            if (pw < 50 || ph < 50 || pw > wa.width || ph > wa.height)
-                throw new Error('Cascade size must fit within the work area and be at least 50px');
-            // Wrap the whole diagonal at the first edge. Zero offsets also allow
-            // in-place stacks or a horizontal/vertical cascade.
-            const slotsX = offsetX === 0 ? count : Math.floor((wa.width - pw) / offsetX) + 1;
-            const slotsY = offsetY === 0 ? count : Math.floor((wa.height - ph) / offsetY) + 1;
-            const slots = Math.min(count, slotsX, slotsY);
-            // Back-to-front, with the focused window last and at the front of
-            // the diagonal. raise() changes stacking, not keyboard focus.
-            const ordered = [...windows.slice(1), focused];
-            ordered.forEach((win, index) => {
-                const slot = index % slots;
-                this._applyMoveResizeInWorkArea(win, slot * offsetX, slot * offsetY, pw, ph);
-                win.raise();
-            });
-            return true;
+            win.allows_move() && win.allows_resize();
+        let windows = [];
+        if (needsApp && eligible(focused)) {
+            const app = Shell.WindowTracker.get_default().get_window_app(focused);
+            windows = [...new Set(app?.get_windows() ?? [])].filter(eligible);
+            if (!windows.includes(focused))
+                windows = [];
+            if (windows.length > Layout.MAX_WINDOWS)
+                throw new Error(`At most ${Layout.MAX_WINDOWS} windows can be arranged`);
+            windows.sort((a, b) => a === b ? 0 : a === focused ? -1 : b === focused ? 1 :
+                a.get_stable_sequence() - b.get_stable_sequence());
         }
-        const columns = layout === 'rows' ? 1 :
-            layout === 'columns' ? count : Math.ceil(Math.sqrt(count));
-        const rows = Math.ceil(count / columns);
-        const usableWidth = wa.width - gap * (columns - 1);
-        const usableHeight = wa.height - gap * (rows - 1);
-        // Compute and validate the whole plan before changing any window.
-        if (Math.floor(usableWidth / columns) < 50 ||
-            Math.floor(usableHeight / rows) < 50)
-            throw new Error('Too many windows or too large a gap for this work area');
-        const plan = windows.map((win, index) => {
-            const col = index % columns;
-            const row = Math.floor(index / columns);
-            const x = Math.floor(usableWidth * col / columns);
-            const y = Math.floor(usableHeight * row / rows);
-            return {win, x: x + gap * col, y: y + gap * row,
-                width: Math.floor(usableWidth * (col + 1) / columns) - x,
-                height: Math.floor(usableHeight * (row + 1) / rows) - y};
-        });
-        for (const cell of plan)
-            this._applyMoveResizeInWorkArea(cell.win, cell.x, cell.y, cell.width, cell.height);
-        return true;
+        const read = win => ({win, rect: this._rect(win), maximized: this._maximizeFlags(win)});
+        return {focused, wa, active: read(focused), activeEligible: eligible(focused),
+            windows: windows.map(read)};
     }
 
-    // Validate every rule before doing anything, including unreachable rules.
-    _parseRules(json) {
-        if (typeof json !== 'string' || json.length > 65536)
-            throw new Error('Rules must be a JSON string of at most 65536 characters');
-        const rules = JSON.parse(json);
-        if (!Array.isArray(rules) || rules.length === 0 || rules.length > 100)
-            throw new Error('Expected 1 to 100 rules');
-        const object = value => value !== null && typeof value === 'object' &&
-            !Array.isArray(value);
-        const fields = ['x', 'y', 'width', 'height'];
-        const validate = (value, condition) => {
-            if (!object(value))
-                throw new Error('Expected a condition or placement object');
-            for (const [key, item] of Object.entries(value)) {
-                if (condition && key === 'tolerance') {
-                    if (typeof item !== 'number' || !Number.isFinite(item) || item < 0)
-                        throw new Error('Tolerance must be a finite nonnegative number');
-                    continue;
-                }
-                if (!fields.includes(key))
-                    throw new Error(`Unknown field: ${key}`);
-                if (item === null && !condition)
-                    continue;
-                const size = key === 'width' || key === 'height';
-                if (typeof item === 'number' && Number.isFinite(item) &&
-                    Math.abs(item) <= 2147483647 && (!size || item >= 50))
-                    continue;
-                if (typeof item === 'string') {
-                    if (/^(100|[0-9]{1,2})%$/.test(item) &&
-                        Number(item.slice(0, -1)) <= 100)
-                        continue;
-                    if (!size && (key === 'x' ? ['left', 'center', 'middle', 'right'] :
-                        ['top', 'center', 'middle', 'bottom']).includes(item))
-                        continue;
-                }
-                throw new Error(`Invalid value for ${key}`);
+    _matches(condition, context, defaultTolerance) {
+        const delta = condition.tolerance ?? defaultTolerance;
+        if (condition.target === 'active')
+            return context.activeEligible &&
+                Layout.matchesActive(condition, context.active.rect, context.wa, delta);
+        if (!context.windows.length || context.windows.some(state => state.maximized))
+            return false;
+        let cells;
+        try {
+            cells = Layout.planLayout(condition, context.windows.length, context.wa);
+        } catch {
+            // A valid layout that cannot fit this monitor is not the current layout.
+            return false;
+        }
+        return Layout.matchesLayout(context.windows.map(state => state.rect), cells, delta);
+    }
+
+    _plan(action, context) {
+        if (action.target === 'active') {
+            if (!context.activeEligible)
+                return [];
+            const rect = Layout.planActive(action, context.active.rect, context.wa);
+            if (Layout.sameRect(rect, context.active.rect) && !context.active.maximized)
+                return [];
+            return [{win: context.focused, rect,
+                semantic: {x: action.x ?? null, y: action.y ?? null}}];
+        }
+        if (!context.windows.length)
+            return [];
+        const cells = Layout.planLayout(action, context.windows.length, context.wa);
+        const states = action.layout === 'cascade' ?
+            [...context.windows.slice(1), context.windows[0]] : context.windows;
+        return states.map((state, index) => ({win: state.win, rect: cells[index],
+            raise: action.layout === 'cascade'}));
+    }
+
+    _executePlan(plan, wa) {
+        if (!plan.length)
+            return false;
+        this._perform(plan.map(item => item.win), () => {
+            for (const {win, rect, semantic, raise} of plan) {
+                this._applyMoveResizeInWorkArea(win, rect.x - wa.x, rect.y - wa.y,
+                    rect.width, rect.height, semantic);
+                if (raise)
+                    win.raise();
             }
-        };
-        for (const rule of rules) {
-            if (!object(rule) || Object.keys(rule).some(key => !['when', 'then'].includes(key)) ||
-                !Object.hasOwn(rule, 'then'))
-                throw new Error('Each rule needs then and optionally when');
-            if (Object.hasOwn(rule, 'when'))
-                validate(rule.when, true);
-            validate(rule.then, false);
-            if (!Object.keys(rule.then).length)
-                throw new Error('Placement must specify at least one field');
-        }
-        return rules;
+        }, plan.some(item => item.raise));
+        return true;
     }
 
-    // First matching rule wins; no match leaves the focused window untouched.
+    ArrangeSameApp(json) {
+        const action = Layout.parseArrangement(json);
+        const context = this._context(true);
+        return context ? this._executePlan(this._plan(action, context), context.wa) : false;
+    }
+
     MoveResizeConditional(json) {
-        const rules = this._parseRules(json);
-        const win = this._getFocusedWindow();
-        if (!win)
+        const config = Layout.parseRules(json);
+        const needsApp = config.rules.some(rule =>
+            rule.when?.target === 'same-app' || rule.then.target === 'same-app');
+        const context = this._context(needsApp);
+        if (!context)
             return false;
-        const workspace = global.workspace_manager.get_active_workspace();
-        const wa = workspace.get_work_area_for_monitor(win.get_monitor());
-        const rect = win.get_frame_rect();
-        const sizeValue = (value, total) => typeof value === 'string' ?
-            Math.floor(total * Number(value.slice(0, -1)) / 100) : value;
-        const positionValue = (value, total, size) =>
-            typeof value === 'string' && value.endsWith('%') ?
-                Math.floor((total - size) * Number(value.slice(0, -1)) / 100) :
-                this._resolvePos(value, total, size);
-        const rule = rules.find(candidate => {
-            const condition = candidate.when ?? {};
-            const tolerance = condition.tolerance ?? 20;
-            return Object.entries(condition).every(([key, value]) => {
-                let expected;
-                let actual;
-                switch (key) {
-                    case 'width':
-                    case 'height':
-                        expected = sizeValue(value, wa[key]);
-                        actual = rect[key];
-                        break;
-                    case 'x':
-                    case 'y': {
-                        const axis = key === 'x' ? 'width' : 'height';
-                        expected = positionValue(value, wa[axis], rect[axis]);
-                        actual = rect[key] - wa[key];
-                        break;
-                    }
-                    default:
-                        return true; // tolerance was validated above.
-                }
-                return Math.abs(actual - expected) <= tolerance;
-            });
-        });
-        if (!rule)
-            return false;
-        const target = rule.then;
-        const width = target.width == null ? rect.width : sizeValue(target.width, wa.width);
-        const height = target.height == null ? rect.height : sizeValue(target.height, wa.height);
-        if (width < 50 || height < 50)
-            throw new Error('Resolved size must be at least 50 pixels');
-        const x = target.x ?? null;
-        const y = target.y ?? null;
-        this._applyMoveResizeInWorkArea(win,
-            x === null ? null : positionValue(x, wa.width, width),
-            y === null ? null : positionValue(y, wa.height, height),
-            width, height, {x, y});
-        return true;
+        const rule = config.rules.find(candidate =>
+            !candidate.when || this._matches(candidate.when, context, config.tolerance));
+        return rule ? this._executePlan(this._plan(rule.then, context), context.wa) : false;
     }
 
     // D-Bus method: MoveResizeSemantic(s, s, s, s) -> b
@@ -592,7 +557,8 @@ class ServiceImpl {
         const px = nx !== null ? this._resolvePos(nx, wa.width, pw) : null;
         const py = ny !== null ? this._resolvePos(ny, wa.height, ph) : null;
 
-        this._applyMoveResizeInWorkArea(win, px, py, pw, ph, {x: nx, y: ny});
+        this._perform([win], () =>
+            this._applyMoveResizeInWorkArea(win, px, py, pw, ph, {x: nx, y: ny}));
         return true;
     }
 
