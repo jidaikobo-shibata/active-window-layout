@@ -1,6 +1,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
+import Shell from 'gi://Shell';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // D-Bus Introspection XML
@@ -36,6 +37,11 @@ const IFACE_XML = `
 
         <method name="MoveToMonitor">
             <arg type="i" name="monitor" direction="in"/>
+            <arg type="b" name="ok" direction="out"/>
+        </method>
+
+        <method name="ArrangeSameApp">
+            <arg type="s" name="options" direction="in"/>
             <arg type="b" name="ok" direction="out"/>
         </method>
 
@@ -351,6 +357,107 @@ class ServiceImpl {
 
         this._cancelPlacement(win);
         win.move_to_monitor(monitor);
+        return true;
+    }
+
+    // Arrange visible normal windows without changing focus or workspace.
+    ArrangeSameApp(json) {
+        if (typeof json !== 'string' || json.length > 4096)
+            throw new Error('Options must be a JSON string of at most 4096 characters');
+        const options = JSON.parse(json);
+        if (options === null || typeof options !== 'object' || Array.isArray(options) ||
+            Object.keys(options).some(key => !['scope', 'layout', 'gap', 'width', 'height', 'offsetX', 'offsetY'].includes(key)))
+            throw new Error('Unexpected arrangement options');
+        const {scope = 'current-workspace-monitor', layout = 'grid', gap = 12} = options;
+        if (scope !== 'current-workspace-monitor')
+            throw new Error('Unsupported scope');
+        if (!['grid', 'columns', 'rows', 'cascade'].includes(layout))
+            throw new Error('Unsupported layout');
+        if (!Number.isSafeInteger(gap) || gap < 0 || gap > 4096)
+            throw new Error('Gap must be an integer between 0 and 4096');
+
+        const cascadeFields = ['width', 'height', 'offsetX', 'offsetY'];
+        if (layout !== 'cascade' && cascadeFields.some(key => Object.hasOwn(options, key)))
+            throw new Error('Size and offsets are only supported for cascade');
+        const {width = '70%', height = '75%', offsetX = 40, offsetY = 40} = options;
+        for (const offset of [offsetX, offsetY]) {
+            if (!Number.isSafeInteger(offset) || offset < 0 || offset > 4096)
+                throw new Error('Offsets must be integers between 0 and 4096');
+        }
+        for (const size of [width, height]) {
+            if (!(Number.isSafeInteger(size) && size >= 50 && size <= 2147483647) &&
+                !(typeof size === 'string' && /^(100|[1-9][0-9]?)%$/.test(size)))
+                throw new Error('Cascade size must be pixels >= 50 or an integer 1% to 100%');
+        }
+
+        const focused = this._getFocusedWindow();
+        if (!focused)
+            return false;
+        const app = Shell.WindowTracker.get_default().get_window_app(focused);
+        if (!app)
+            return false;
+        const workspace = global.workspace_manager.get_active_workspace();
+        const monitor = focused.get_monitor();
+        const windows = [...new Set(app.get_windows())].filter(win =>
+            win.get_window_type() === Meta.WindowType.NORMAL &&
+            win.get_transient_for() === null && !win.skip_taskbar &&
+            !win.minimized && !win.is_fullscreen() &&
+            win.located_on_workspace(workspace) && win.get_monitor() === monitor &&
+            win.allows_move() && win.allows_resize());
+        // Do not arrange other windows when invoked from an excluded dialog etc.
+        if (!windows.includes(focused))
+            return false;
+        windows.sort((a, b) => {
+            if (a === b)
+                return 0;
+            if (a === focused)
+                return -1;
+            if (b === focused)
+                return 1;
+            return a.get_stable_sequence() - b.get_stable_sequence();
+        });
+        const count = windows.length;
+        const wa = workspace.get_work_area_for_monitor(monitor);
+        if (layout === 'cascade') {
+            const pw = this._resolveSize(width, wa.width);
+            const ph = this._resolveSize(height, wa.height);
+            if (pw < 50 || ph < 50 || pw > wa.width || ph > wa.height)
+                throw new Error('Cascade size must fit within the work area and be at least 50px');
+            // Wrap the whole diagonal at the first edge. Zero offsets also allow
+            // in-place stacks or a horizontal/vertical cascade.
+            const slotsX = offsetX === 0 ? count : Math.floor((wa.width - pw) / offsetX) + 1;
+            const slotsY = offsetY === 0 ? count : Math.floor((wa.height - ph) / offsetY) + 1;
+            const slots = Math.min(count, slotsX, slotsY);
+            // Back-to-front, with the focused window last and at the front of
+            // the diagonal. raise() changes stacking, not keyboard focus.
+            const ordered = [...windows.slice(1), focused];
+            ordered.forEach((win, index) => {
+                const slot = index % slots;
+                this._applyMoveResizeInWorkArea(win, slot * offsetX, slot * offsetY, pw, ph);
+                win.raise();
+            });
+            return true;
+        }
+        const columns = layout === 'rows' ? 1 :
+            layout === 'columns' ? count : Math.ceil(Math.sqrt(count));
+        const rows = Math.ceil(count / columns);
+        const usableWidth = wa.width - gap * (columns - 1);
+        const usableHeight = wa.height - gap * (rows - 1);
+        // Compute and validate the whole plan before changing any window.
+        if (Math.floor(usableWidth / columns) < 50 ||
+            Math.floor(usableHeight / rows) < 50)
+            throw new Error('Too many windows or too large a gap for this work area');
+        const plan = windows.map((win, index) => {
+            const col = index % columns;
+            const row = Math.floor(index / columns);
+            const x = Math.floor(usableWidth * col / columns);
+            const y = Math.floor(usableHeight * row / rows);
+            return {win, x: x + gap * col, y: y + gap * row,
+                width: Math.floor(usableWidth * (col + 1) / columns) - x,
+                height: Math.floor(usableHeight * (row + 1) / rows) - y};
+        });
+        for (const cell of plan)
+            this._applyMoveResizeInWorkArea(cell.win, cell.x, cell.y, cell.width, cell.height);
         return true;
     }
 

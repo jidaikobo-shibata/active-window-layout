@@ -103,8 +103,19 @@ function fixture({synchronous = false, refuse = false, rect = {}} = {}) {
     const display = new Signals();
     display.get_focus_window = () => win;
     display.get_n_monitors = () => 2;
+    const app = {get_windows: () => [win]};
+    Object.assign(win, {
+        get_window_type: () => 0,
+        get_transient_for: () => null,
+        located_on_workspace: candidate => candidate === workspace,
+        allows_move: () => true,
+        allows_resize: () => true,
+        get_stable_sequence: () => 1,
+    });
+    const tracker = {get_window_app: () => app};
     const context = {
-        GLib, Gio: {}, Meta: {MaximizeFlags: {BOTH: 3}}, Extension: class {},
+        GLib, Gio: {}, Meta: {MaximizeFlags: {BOTH: 3}, WindowType: {NORMAL: 0}},
+        Shell: {WindowTracker: {get_default: () => tracker}}, Extension: class {},
         global: {
             display,
             workspace_manager: {get_active_workspace: () => activeWorkspace},
@@ -113,7 +124,7 @@ function fixture({synchronous = false, refuse = false, rect = {}} = {}) {
     vm.runInNewContext(`${source}\nthis.Service = ServiceImpl;`, context);
     const service = new context.Service();
     return {
-        service, win, display, wa, sources, advance,
+        service, win, display, wa, sources, advance, app, tracker,
         changeWorkspace() { activeWorkspace = {}; },
         cleanup() {
             advance(2000);
@@ -367,5 +378,147 @@ test('no focused window returns false', () => {
     const f = fixture();
     f.display.get_focus_window = () => null;
     assert.equal(f.service.MoveResizeConditional('[{"then":{"width":1000}}]'), false);
+    f.cleanup();
+});
+
+function arrangementFixture(count) {
+    const f = fixture({refuse: true});
+    const windows = [f.win];
+    for (let i = 1; i < count; i++) {
+        const win = Object.assign(new Signals(), f.win);
+        win.handlers = new Map();
+        win.rect = {...f.win.rect};
+        win.requests = [];
+        win.moves = [];
+        win.get_stable_sequence = () => i + 1;
+        windows.push(win);
+    }
+    f.app.get_windows = () => [...windows].reverse();
+    return {...f, windows};
+}
+
+for (const [layout, count, columns, rows] of [
+    ['grid', 1, 1, 1], ['grid', 2, 2, 1], ['grid', 3, 2, 2],
+    ['grid', 4, 2, 2], ['grid', 5, 3, 2],
+    ['columns', 3, 3, 1], ['rows', 3, 1, 3],
+]) {
+    test(`ArrangeSameApp ${layout} with ${count} windows partitions the work area`, () => {
+        const f = arrangementFixture(count);
+        assert.equal(f.service.ArrangeSameApp(JSON.stringify({layout, gap: 13})), true);
+        const w = f.wa.width - (columns - 1) * 13;
+        const h = f.wa.height - (rows - 1) * 13;
+        f.windows.forEach((win, i) => {
+            const col = i % columns;
+            const row = Math.floor(i / columns);
+            assert.deepEqual(win.requests.at(-1), {
+                x: f.wa.x + Math.floor(w * col / columns) + 13 * col,
+                y: f.wa.y + Math.floor(h * row / rows) + 13 * row,
+                width: Math.floor(w * (col + 1) / columns) - Math.floor(w * col / columns),
+                height: Math.floor(h * (row + 1) / rows) - Math.floor(h * row / rows),
+            });
+        });
+        f.cleanup();
+    });
+}
+
+test('ArrangeSameApp excludes other monitors, workspaces and non-normal or unavailable windows', () => {
+    const f = arrangementFixture(10);
+    const changes = [
+        win => { win.monitor = 0; },
+        win => { win.located_on_workspace = () => false; },
+        win => { win.get_window_type = () => 1; },
+        win => { win.get_transient_for = () => f.win; },
+        win => { win.minimized = true; },
+        win => { win.fullscreen = true; },
+        win => { win.skip_taskbar = true; },
+        win => { win.allows_move = () => false; },
+        win => { win.allows_resize = () => false; },
+    ];
+    changes.forEach((change, i) => change(f.windows[i + 1]));
+    f.service.ArrangeSameApp('{}');
+    assert.equal(f.win.requests.at(-1).width, f.wa.width);
+    for (const win of f.windows.slice(1))
+        assert.equal(win.requests.length, 0);
+    f.cleanup();
+});
+
+test('ArrangeSameApp refuses invalid options or a plan with undersized cells before mutation', () => {
+    const f = arrangementFixture(3);
+    for (const value of ['null', '[]', 'broken', '{"scope":"all"}',
+        '{"layout":"diagonal"}', '{"gap":-1}', '{"gap":1.5}',
+        '{"gap":null}', '{"unknown":1}', '{"gap":4097}',
+        '{"gap":1000,"layout":"columns"}', ' '.repeat(4097)]) {
+        assert.throws(() => f.service.ArrangeSameApp(value));
+        assert.ok(f.windows.every(win => win.requests.length === 0));
+    }
+    f.cleanup();
+});
+
+test('ArrangeSameApp does nothing without focus, recognized app or eligible focused window', () => {
+    const f = arrangementFixture(2);
+    f.display.get_focus_window = () => null;
+    assert.equal(f.service.ArrangeSameApp('{}'), false);
+    f.display.get_focus_window = () => f.win;
+    f.tracker.get_window_app = () => null;
+    assert.equal(f.service.ArrangeSameApp('{}'), false);
+    f.tracker.get_window_app = () => f.app;
+    f.win.fullscreen = true;
+    assert.equal(f.service.ArrangeSameApp('{}'), false);
+    assert.ok(f.windows.every(win => win.requests.length === 0));
+    f.cleanup();
+});
+
+test('ArrangeSameApp cancels prior semantic corrections and unmaximizes windows', () => {
+    const f = arrangementFixture(2);
+    f.service.MoveResizeSemantic('right', 'bottom', '1000', '700');
+    f.win.maximized = 3;
+    f.service.ArrangeSameApp('{"gap":0}');
+    assert.equal(f.win.maximized, 0);
+    assert.equal(f.win.handlers.size, 0);
+    f.advance(50);
+    assert.equal(f.win.rect.x, f.wa.x);
+    f.cleanup();
+});
+
+test('cascade offsets windows and stacks focused window last without activation', () => {
+    const f = arrangementFixture(3);
+    const raised = [];
+    f.windows.forEach(win => { win.raise = () => raised.push(win); });
+    assert.equal(f.service.ArrangeSameApp('{"layout":"cascade"}'), true);
+    const ordered = [f.windows[1], f.windows[2], f.win];
+    assert.deepEqual(raised, ordered);
+    ordered.forEach((win, i) => {
+        assert.deepEqual(win.requests.at(-1), {
+            x: f.wa.x + i * 40, y: f.wa.y + i * 40,
+            width: 1344, height: 786,
+        });
+    });
+    f.cleanup();
+});
+
+test('cascade wraps at first edge and supports horizontal, vertical and zero offsets', () => {
+    for (const [offsetX, offsetY] of [[40, 40], [40, 0], [0, 40], [0, 0]]) {
+        const f = arrangementFixture(4);
+        f.windows.forEach(win => { win.raise = () => {}; });
+        f.service.ArrangeSameApp(JSON.stringify({layout: 'cascade', width: 1900,
+            height: 1000, offsetX, offsetY}));
+        const slots = Math.min(4, offsetX ? 1 : 4, offsetY ? 2 : 4);
+        [f.windows[1], f.windows[2], f.windows[3], f.win].forEach((win, i) => {
+            assert.equal(win.requests.at(-1).x, f.wa.x + (i % slots) * offsetX);
+            assert.equal(win.requests.at(-1).y, f.wa.y + (i % slots) * offsetY);
+        });
+        f.cleanup();
+    }
+});
+
+test('cascade validates all options and resolved sizes before moving or raising', () => {
+    const f = arrangementFixture(2);
+    for (const extra of [{width: 49}, {height: '0%'}, {width: '101%'},
+        {width: 9999}, {height: '1%'}, {offsetX: -1}, {offsetY: 0.5},
+        {offsetX: null}, {height: null}, {offsetY: 4097}]) {
+        assert.throws(() => f.service.ArrangeSameApp(JSON.stringify({layout: 'cascade', ...extra})));
+        assert.ok(f.windows.every(win => win.requests.length === 0));
+    }
+    assert.throws(() => f.service.ArrangeSameApp('{"layout":"grid","width":1000}'));
     f.cleanup();
 });
