@@ -928,3 +928,118 @@ test('closing a failed undo target removes its retained history and observers', 
     assert.equal(f.win.handlers.size, 0);
     f.cleanup();
 });
+
+function stackingFixture() {
+    const f = arrangementFixture(3, exact);
+    let stacking = [f.windows[1], f.windows[2], f.win];
+    const raised = [];
+    const closed = new Set();
+    f.display.sort_windows_by_stacking = windows => stacking.filter(win => windows.includes(win));
+    f.windows.forEach(win => {
+        win.raise = () => {
+            assert.equal(closed.has(win), false, 'closed window must not be raised');
+            raised.push(win);
+            stacking = [...stacking.filter(item => item !== win), win];
+        };
+    });
+    return {...f, raised, getStack: () => [...stacking], close(win) {
+        closed.add(win);
+        stacking = stacking.filter(item => item !== win);
+        win.emit('unmanaged');
+    }};
+}
+
+test('cascade undo restores the original complete stack after retrying only failed geometry', () => {
+    const f = stackingFixture();
+    const originalStack = f.getStack();
+    const originalRects = f.windows.map(win => ({...win.rect}));
+    f.service.ArrangeSameApp('{"layout":"cascade"}');
+    const failed = f.windows[1];
+    const apply = failed.move_resize_frame;
+    failed.move_resize_frame = () => { throw new Error('injected geometry failure'); };
+    f.raised.length = 0;
+    assert.equal(f.service.UndoLastOperation(), true);
+    assert.equal(f.raised.length, 0, 'stack restoration waits for pending geometry');
+    const successfulCounts = [f.win.requests.length, f.windows[2].requests.length];
+    failed.move_resize_frame = apply;
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    assert.deepEqual(f.getStack(), originalStack);
+    assert.deepEqual(f.raised, originalStack);
+    assert.deepEqual(f.windows.map(win => win.rect), originalRects);
+    assert.deepEqual([f.win.requests.length, f.windows[2].requests.length], successfulCounts);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+    assert.ok(f.windows.every(win => win.handlers.size === 0));
+});
+
+test('a failed stacking pass is retained even after all geometry has been restored', () => {
+    const f = stackingFixture();
+    const originalStack = f.getStack();
+    f.service.ArrangeSameApp('{"layout":"cascade"}');
+    const failed = originalStack[1];
+    const raise = failed.raise;
+    failed.raise = () => { throw new Error('injected raise failure'); };
+    assert.equal(f.service.UndoLastOperation(), true, 'geometry was restored');
+    assert.equal(f.service._history.size, 1);
+    assert.equal(f.service._history.peek().length, 0, 'only stacking remains');
+    assert.equal(f.service.UndoLastOperation(), false, 'stack-only retry still failed');
+    const requestCounts = f.windows.map(win => win.requests.length);
+    failed.raise = raise;
+    f.raised.length = 0;
+    assert.equal(f.service.UndoLastOperation(), true);
+    assert.deepEqual(f.raised, originalStack, 'restart the complete back-to-front pass');
+    assert.deepEqual(f.getStack(), originalStack);
+    assert.deepEqual(f.windows.map(win => win.requests.length), requestCounts);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('closing an already restored peer removes its retained stacking reference before retry', () => {
+    const f = stackingFixture();
+    const expected = f.getStack().filter(win => win !== f.windows[2]);
+    f.service.ArrangeSameApp('{"layout":"cascade"}');
+    const failed = f.windows[1];
+    const apply = failed.move_resize_frame;
+    failed.move_resize_frame = () => { throw new Error('injected geometry failure'); };
+    f.service.UndoLastOperation();
+    f.close(f.windows[2]);
+    assert.equal(f.windows[2].handlers.size, 0);
+    failed.move_resize_frame = apply;
+    f.service.UndoLastOperation();
+    assert.deepEqual(f.getStack(), expected);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('already restored peers moved to another workspace are not raised on retry', () => {
+    const f = stackingFixture();
+    f.service.ArrangeSameApp('{"layout":"cascade"}');
+    const failed = f.windows[1];
+    const apply = failed.move_resize_frame;
+    failed.move_resize_frame = () => { throw new Error('injected geometry failure'); };
+    f.service.UndoLastOperation();
+    const otherWorkspace = {};
+    f.windows[2].get_workspace = () => otherWorkspace;
+    failed.move_resize_frame = apply;
+    f.raised.length = 0;
+    f.service.UndoLastOperation();
+    assert.equal(f.raised.includes(f.windows[2]), false);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('bounded history eviction releases peers retained only for a pending stacking restore', () => {
+    const f = stackingFixture();
+    f.service.ArrangeSameApp('{"layout":"cascade"}');
+    f.windows[1].move_resize_frame = () => { throw new Error('injected geometry failure'); };
+    f.service.UndoLastOperation();
+    f.advance(2000);
+    assert.ok(f.windows[2].handlers.size > 0, 'stack-only peer is still observed');
+    for (let i = 0; i < 20; i++)
+        f.service.ResizeInWorkArea(1000 + i, 700);
+    assert.equal(f.service._history.size, 20);
+    assert.equal(f.windows[1].handlers.size, 0);
+    assert.equal(f.windows[2].handlers.size, 0);
+    f.cleanup();
+});

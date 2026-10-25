@@ -111,6 +111,7 @@ def check():
     grid = rects()
     call('Focus', '(i)', (ids[2],), True)
     settle()
+    grid_stack = inspect()['stacking']
     conditional(rules)
     settle()
     assert all(r['width'] == 1344 for r in rects().values())
@@ -128,8 +129,9 @@ def check():
     assert call('UndoLastOperation') == (True,)
     settle()
     expect_same(grid)
+    assert inspect()['stacking'] == grid_stack, inspect()
     assert inspect()['history'] == 1
-    print('PASS: grid/cascade after focus change; failed undo target retained and retried', flush=True)
+    print('PASS: grid/cascade after focus change; failed undo retried with original stacking', flush=True)
     conditional(rules)
     settle()
     call('Close', '(i)', (ids[1],), True)

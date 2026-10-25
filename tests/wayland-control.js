@@ -37,6 +37,8 @@ class Control {
     Inspect() {
         const service = Extension.lookupByUUID(UUID)?._impl;
         return JSON.stringify({history: service?._history.size,
+            stacking: global.display.sort_windows_by_stacking(this.windows())
+                .map(win => win.get_stable_sequence()),
             pendingUndo: service?._history.peek().map(state => state.win.get_stable_sequence()),
             windows: this.windows().map(win => {
                 const rect = win.get_frame_rect();

@@ -379,21 +379,51 @@ class ServiceImpl {
     }
 
     UndoLastOperation() {
-        const states = this._history.peek();
+        const operation = this._history.peekOperation();
+        if (!operation)
+            return false;
         let restored = false;
-        for (const state of states) {
+        for (const state of [...operation.states]) {
+            if (!this._history.has(operation) || !operation.states.includes(state))
+                continue;
             try {
-                if (this._restoreState(state))
-                    restored = true;
-                // Completed and intentionally skipped states are consumed.
-                // Failed states stay observed and can be retried next time.
-                this._history.consume(state);
+                const changed = this._restoreState(state);
+                restored = changed || restored;
+                this._history.consume(operation, state, changed);
             } catch (error) {
                 this._cancelPlacement(state.win);
                 console.error('Active Window Layout: could not undo a window operation', error);
             }
         }
+        // Restore all target windows' original relative order only once every
+        // geometry request has succeeded (or been intentionally skipped).
+        if (this._history.has(operation) && !operation.states.length) {
+            try {
+                restored = this._restoreStack(operation) || restored;
+            } catch (error) {
+                // Keep the entire order so retrying a failed raise() starts
+                // back-to-front again, including previously raised windows.
+                console.error('Active Window Layout: could not restore stacking', error);
+            }
+        }
         return restored;
+    }
+
+    _restoreStack(operation) {
+        let raised = false;
+        for (const state of [...operation.stacking]) {
+            if (!this._history.has(operation) || !operation.stacking.includes(state))
+                continue;
+            const {win} = state;
+            if (win.get_workspace() !== state.workspace || win.get_monitor() !== state.monitor) {
+                this._history.skipStackState(operation, state);
+                continue;
+            }
+            win.raise();
+            raised = true;
+        }
+        this._history.completeStack(operation);
+        return raised;
     }
 
     _restoreState(state) {
@@ -420,8 +450,6 @@ class ServiceImpl {
             win.set_maximize_flags(state.maximized);
         if (state.fullscreen)
             win.make_fullscreen();
-        if (state.restoreStack)
-            win.raise();
         return true;
     }
 
