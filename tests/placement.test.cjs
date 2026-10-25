@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const layoutSource = readFileSync(`${__dirname}/../layout.js`, 'utf8').replace(/^export /gm, '');
 const historySource = readFileSync(`${__dirname}/../history.js`, 'utf8').replace(/^export /gm, '');
 const layoutContext = {};
-vm.runInNewContext(`${layoutSource}\nthis.api = {MAX_WINDOWS, parseRules, parseArrangement, planActive, planLayout, matchesActive, matchesLayout, sameRect};`, layoutContext);
+vm.runInNewContext(`${layoutSource}\nthis.api = {MAX_WINDOWS, parseRules, parseArrangement, planActive, planLayout, matchesActive, matchesLayout, sameRect, validateRect};`, layoutContext);
 
 const source = readFileSync(`${__dirname}/../extension.js`, 'utf8')
     .replace(/^import .*;\n/gm, '')
@@ -76,10 +76,12 @@ function fixture({synchronous = false, refuse = false, rounding = true, rect = {
         requests: [],
         get_monitor() { return this.monitor; },
         get_frame_rect() { return {...this.rect}; },
-        get_maximized() { return this.maximized; },
+        get_maximize_flags() { return this.maximized; },
+        resizeable: true,
         is_fullscreen() { return this.fullscreen; },
         unmaximize() { this.maximized = 0; },
-        maximize(flags = 3) { this.maximized = flags; },
+        maximize() { this.maximized = 3; },
+        set_maximize_flags(flags) { this.maximized |= flags; },
         unmake_fullscreen() { this.fullscreen = false; },
         make_fullscreen() { this.fullscreen = true; },
         get_workspace: () => workspace,
@@ -120,11 +122,13 @@ function fixture({synchronous = false, refuse = false, rounding = true, rect = {
         get_transient_for: () => null,
         located_on_workspace: candidate => candidate === workspace,
         allows_move: () => true,
-        allows_resize: () => true,
+        allows_resize() { return this.resizeable && this.maximized !== 3 && !this.fullscreen; },
         get_stable_sequence: () => 1,
     });
     const tracker = {get_window_app: () => app};
+    const logs = [];
     const context = {
+        console: {error: (...args) => logs.push(args)},
         Layout: layoutContext.api, GLib, Gio: {}, Meta: {MaximizeFlags: {BOTH: 3}, WindowType: {NORMAL: 0}},
         Shell: {WindowTracker: {get_default: () => tracker}}, Extension: class {},
         global: {
@@ -135,7 +139,7 @@ function fixture({synchronous = false, refuse = false, rounding = true, rect = {
     vm.runInNewContext(`${historySource}\n${source}\nthis.Service = ServiceImpl;`, context);
     const service = new context.Service();
     return {
-        service, win, display, wa, sources, advance, app, tracker,
+        service, win, display, wa, sources, advance, app, tracker, logs,
         changeWorkspace() { activeWorkspace = {}; },
         cleanup() {
             advance(2000);
@@ -284,8 +288,7 @@ test('destroy removes pending callbacks before a delayed client response', () =>
 
 test('GNOME 50 maximization API is supported', () => {
     const f = fixture();
-    f.win.get_maximize_flags = f.win.get_maximized;
-    delete f.win.get_maximized;
+    f.win.maximized = 3;
     f.service.MoveResizeSemantic('right', 'top', '1100', '95%');
     f.advance(50);
     assert.equal(f.win.rect.x + f.win.rect.width, f.wa.x + f.wa.width);
@@ -723,22 +726,15 @@ test('history is bounded to 20 operations, LIFO and cleared on work area change'
     f.cleanup();
 });
 
-for (const version of ['old', 'new']) {
-    test(`undo restores maximization flags on ${version} GNOME API`, () => {
-        const f = fixture(exact);
-        f.win.maximized = 1;
-        if (version === 'new') {
-            f.win.get_maximize_flags = f.win.get_maximized;
-            delete f.win.get_maximized;
-            f.win.set_maximize_flags = flags => { f.win.maximized = flags; };
-        }
-        f.service.ResizeInWorkArea(1000, 700);
-        assert.equal(f.win.maximized, 0);
-        f.service.UndoLastOperation();
-        assert.equal(f.win.maximized, 1);
-        f.cleanup();
-    });
-}
+test('undo restores partial maximization flags on GNOME 50', () => {
+    const f = fixture(exact);
+    f.win.maximized = 1;
+    f.service.ResizeInWorkArea(1000, 700);
+    assert.equal(f.win.maximized, 0);
+    f.service.UndoLastOperation();
+    assert.equal(f.win.maximized, 1);
+    f.cleanup();
+});
 
 test('legacy monitor move can be undone and each legacy call is a separate entry', () => {
     const f = fixture(exact);
@@ -792,4 +788,143 @@ test('undo restores target stacking for cascade and destroy disconnects history 
     f.service.ArrangeSameApp('{}');
     f.cleanup();
     assert.ok(f.windows.every(win => win.handlers.size === 0));
+});
+
+test('GNOME 50 maximized active and background windows are included before unmaximizing', () => {
+    const f = arrangementFixture(3, exact);
+    f.win.maximized = 3;
+    f.windows[1].maximized = 3;
+    assert.equal(f.win.allows_resize(), false, 'mock follows Mutter 50 maximized behavior');
+    assert.equal(f.windows[1].allows_resize(), false);
+    assert.equal(f.service.ArrangeSameApp('{}'), true);
+    assert.ok(f.windows.every(win => win.requests.length === 2));
+    assert.ok(f.windows.every(win => win.maximized === 0));
+    assert.equal(f.service._history.size, 1);
+    assert.equal(f.service.UndoLastOperation(), true);
+    assert.equal(f.win.maximized, 3);
+    assert.equal(f.windows[1].maximized, 3);
+    f.cleanup();
+});
+
+test('active conditional placement can resize a maximized window without matching grid first', () => {
+    const f = fixture(exact);
+    f.win.maximized = 3;
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {when: {target: 'same-app', layout: 'grid'}, then: {target: 'active', width: 900}},
+        {then: {target: 'active', width: 1000, height: 700}},
+    ])), true);
+    assert.equal(f.win.maximized, 0);
+    assert.equal(f.win.rect.width, 1000);
+    f.cleanup();
+});
+
+test('intrinsically nonresizable windows remain excluded even if marked maximized', () => {
+    const f = arrangementFixture(3, exact);
+    f.windows[1].resizeable = false;
+    f.windows[1].maximized = 3;
+    f.windows[2].resizeable = false;
+    f.service.ArrangeSameApp('{}');
+    assert.equal(f.win.rect.width, f.wa.width);
+    assert.equal(f.windows[1].requests.length, 0);
+    assert.equal(f.windows[2].requests.length, 0);
+    f.cleanup();
+});
+
+test('nonstring layout values are rejected in both APIs including unreachable conditions', () => {
+    const f = arrangementFixture(2, exact);
+    f.win.maximized = 3;
+    for (const layout of [['cascade'], ['grid'], [['cascade']], null, 1, {}, true]) {
+        assert.throws(() => f.service.ArrangeSameApp(JSON.stringify({layout})));
+        assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+            {then: {target: 'same-app', layout}},
+        ])));
+        assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+            {then: {target: 'active', width: 1000}},
+            {when: {target: 'same-app', layout}, then: {target: 'active', width: 900}},
+        ])));
+    }
+    assert.equal(f.win.maximized, 3);
+    assert.equal(f.service._history.size, 0);
+    assert.ok(f.windows.every(win => win.requests.length === 0));
+    f.cleanup();
+});
+
+test('computed integer overflow is rejected before unmaximizing and before recording history', () => {
+    const f = fixture(exact);
+    f.win.maximized = 3;
+    assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', x: 2147483647, width: 1000}},
+    ])));
+    assert.equal(f.win.maximized, 3);
+    assert.equal(f.win.requests.length, 0);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('final plan validates every rectangle before changing even the first window', () => {
+    const f = arrangementFixture(2, exact);
+    for (const invalid of [NaN, Infinity, 0.5]) {
+        assert.throws(() => f.service._executePlan([
+            {win: f.win, rect: {x: 1920, y: 32, width: 1000, height: 700}},
+            {win: f.windows[1], rect: {x: invalid, y: 32, width: 1000, height: 700}},
+        ], f.wa));
+    }
+    assert.ok(f.windows.every(win => win.requests.length === 0));
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('partial undo continues past an exception and retains only the failed target for retry', () => {
+    const f = arrangementFixture(3, exact);
+    const original = f.windows.map(win => ({...win.rect}));
+    f.service.ArrangeSameApp('{}');
+    f.advance(50);
+    const failed = f.windows[1];
+    const apply = failed.move_resize_frame;
+    failed.move_resize_frame = () => { throw new Error('injected restore error'); };
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    assert.deepEqual(f.win.rect, original[0]);
+    assert.deepEqual(f.windows[2].rect, original[2]);
+    assert.equal(f.service._history.size, 1);
+    assert.equal(f.service._history.peek().length, 1);
+    assert.equal(f.service._history.peek()[0].win, failed);
+    assert.equal(f.logs.length, 1);
+    assert.equal(f.service._placements.has(failed), false, 'failed restore observer was canceled');
+    failed.move_resize_frame = apply;
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    assert.deepEqual(failed.rect, original[1]);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('fully failed undo retains history, does not duplicate entries and can later be retried', () => {
+    const f = fixture(exact);
+    const original = {...f.win.rect};
+    f.service.ResizeInWorkArea(1000, 700);
+    const apply = f.win.move_resize_frame;
+    f.win.move_resize_frame = () => { throw new Error('injected restore error'); };
+    assert.equal(f.service.UndoLastOperation(), false);
+    assert.equal(f.service.UndoLastOperation(), false);
+    assert.equal(f.service._history.size, 1);
+    assert.equal(f.service._history.peek().length, 1);
+    f.win.move_resize_frame = apply;
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    assert.deepEqual(f.win.rect, original);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('closing a failed undo target removes its retained history and observers', () => {
+    const f = fixture(exact);
+    f.service.ResizeInWorkArea(1000, 700);
+    f.win.move_resize_frame = () => { throw new Error('injected restore error'); };
+    f.service.UndoLastOperation();
+    assert.equal(f.service._history.size, 1);
+    f.win.emit('unmanaged');
+    assert.equal(f.service._history.size, 0);
+    assert.equal(f.win.handlers.size, 0);
+    f.cleanup();
 });

@@ -19,10 +19,14 @@ export class OperationHistory {
         this._syncSignals();
     }
 
-    pop() {
-        const entry = this._entries.pop() ?? [];
+    peek() {
+        return [...(this._entries.at(-1) ?? [])];
+    }
+
+    consume(state) {
+        this._entries = this._entries.map(entry => entry.filter(item => item !== state))
+            .filter(entry => entry.length);
         this._syncSignals();
-        return entry;
     }
 
     forget(win) {

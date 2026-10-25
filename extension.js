@@ -111,11 +111,7 @@ class ServiceImpl {
     }
 
     _isMaximized(win) {
-        if (typeof win.get_maximized === 'function')
-            return win.get_maximized() !== 0;
-        if (typeof win.get_maximize_flags === 'function')
-            return win.get_maximize_flags() !== 0;
-        return win.is_maximized();
+        return this._maximizeFlags(win) !== 0;
     }
 
     _watchSemanticPlacement(win, x, y, force = false) {
@@ -175,22 +171,11 @@ class ServiceImpl {
         return win ?? null;
     }
 
-    // Move/resize often doesn't work when maximized, so disable it.
-    // Tile (snap) mode can be restrictive, so disable it.
-    // Check for existence of methods, as they may not be available depending on the environment.
+    // GNOME 50: unmaximize() clears both directions; retain the optional
+    // untile hook where available for tiled windows.
     _ensureResizableMovable(win) {
-        if (typeof win.get_maximized === 'function') {
-            // GNOME Shell 45/46: unmaximize takes direction flags.
-            if (win.get_maximized() !== 0)
-                win.unmaximize(Meta.MaximizeFlags.BOTH);
-        } else if (typeof win.get_maximize_flags === 'function') {
-            // GNOME Shell 50: also handle maximization on just one axis.
-            if (win.get_maximize_flags() !== 0)
-                win.unmaximize();
-        } else if (typeof win.is_maximized === 'function' && win.is_maximized()) {
+        if (this._isMaximized(win))
             win.unmaximize();
-        }
-
         if (typeof win.untile === 'function')
             win.untile();
     }
@@ -377,11 +362,7 @@ class ServiceImpl {
     }
 
     _maximizeFlags(win) {
-        if (typeof win.get_maximized === 'function')
-            return win.get_maximized();
-        if (typeof win.get_maximize_flags === 'function')
-            return win.get_maximize_flags();
-        return win.is_maximized() ? Meta.MaximizeFlags.BOTH : 0;
+        return win.get_maximize_flags();
     }
 
     // Capture every target before mutating any of them. A partially failed
@@ -398,42 +379,50 @@ class ServiceImpl {
     }
 
     UndoLastOperation() {
-        const states = this._history.pop();
+        const states = this._history.peek();
         let restored = false;
         for (const state of states) {
-            const {win, rect} = state;
-            // Closed windows have already been removed by OperationHistory.
-            // Do not move windows back from a manually selected workspace.
-            if (win.get_workspace() !== state.workspace ||
-                state.monitor < 0 || state.monitor >= global.display.get_n_monitors())
-                continue;
-            this._cancelPlacement(win);
-            if (win.is_fullscreen())
-                win.unmake_fullscreen();
-            this._ensureResizableMovable(win);
-            if (win.get_monitor() !== state.monitor)
-                win.move_to_monitor(state.monitor);
-            if (!state.maximized && !state.fullscreen &&
-                global.workspace_manager.get_active_workspace() === state.workspace) {
-                const wa = state.workspace.get_work_area_for_monitor(state.monitor);
-                this._watchSemanticPlacement(win, rect.x - wa.x, rect.y - wa.y, true);
+            try {
+                if (this._restoreState(state))
+                    restored = true;
+                // Completed and intentionally skipped states are consumed.
+                // Failed states stay observed and can be retried next time.
+                this._history.consume(state);
+            } catch (error) {
+                this._cancelPlacement(state.win);
+                console.error('Active Window Layout: could not undo a window operation', error);
             }
-            win.move_resize_frame(true, rect.x, rect.y, rect.width, rect.height);
-            if (state.maximized) {
-                if (typeof win.set_maximize_flags === 'function')
-                    win.set_maximize_flags(state.maximized);
-                else if (typeof win.get_maximized === 'function')
-                    win.maximize(state.maximized);
-                else
-                    win.maximize();
-            }
-            if (state.fullscreen)
-                win.make_fullscreen();
-            if (state.restoreStack)
-                win.raise();
-            restored = true;
         }
         return restored;
+    }
+
+    _restoreState(state) {
+        const {win, rect} = state;
+        // Closed windows have already been removed by OperationHistory.
+        // Do not move windows back from a manually selected workspace.
+        if (win.get_workspace() !== state.workspace ||
+            state.monitor < 0 || state.monitor >= global.display.get_n_monitors())
+            return false;
+        Layout.validateRect(rect, 1);
+        this._cancelPlacement(win);
+        if (win.is_fullscreen())
+            win.unmake_fullscreen();
+        this._ensureResizableMovable(win);
+        if (win.get_monitor() !== state.monitor)
+            win.move_to_monitor(state.monitor);
+        if (!state.maximized && !state.fullscreen &&
+            global.workspace_manager.get_active_workspace() === state.workspace) {
+            const wa = state.workspace.get_work_area_for_monitor(state.monitor);
+            this._watchSemanticPlacement(win, rect.x - wa.x, rect.y - wa.y, true);
+        }
+        win.move_resize_frame(true, rect.x, rect.y, rect.width, rect.height);
+        if (state.maximized)
+            win.set_maximize_flags(state.maximized);
+        if (state.fullscreen)
+            win.make_fullscreen();
+        if (state.restoreStack)
+            win.raise();
+        return true;
     }
 
     // Resolve targets and read geometry once, before condition evaluation.
@@ -448,7 +437,8 @@ class ServiceImpl {
             win.get_transient_for() === null && !win.skip_taskbar &&
             !win.minimized && !win.is_fullscreen() &&
             win.located_on_workspace(workspace) && win.get_monitor() === monitor &&
-            win.allows_move() && win.allows_resize();
+            win.allows_move() && (win.allows_resize() ||
+                (this._isMaximized(win) && win.resizeable));
         let windows = [];
         if (needsApp && eligible(focused)) {
             const app = Shell.WindowTracker.get_default().get_window_app(focused);
@@ -504,6 +494,8 @@ class ServiceImpl {
     _executePlan(plan, wa) {
         if (!plan.length)
             return false;
+        for (const {rect} of plan)
+            Layout.validateRect(rect);
         this._perform(plan.map(item => item.win), () => {
             for (const {win, rect, semantic, raise} of plan) {
                 this._applyMoveResizeInWorkArea(win, rect.x - wa.x, rect.y - wa.y,

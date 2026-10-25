@@ -64,7 +64,7 @@ function descriptor(value, condition = false) {
         return {...value};
     }
     const layout = value.layout;
-    if (!Object.hasOwn(LAYOUTS, layout))
+    if (typeof layout !== 'string' || !Object.hasOwn(LAYOUTS, layout))
         throw new Error('Unknown layout');
     const fields = layout === 'cascade' ? [...CASCADE, 'gap'] : ['gap'];
     object(value, ['target', 'layout', ...fields, ...(condition ? ['tolerance'] : [])], layout);
@@ -136,7 +136,7 @@ export function planActive(action, rect, wa) {
         throw new Error('Resolved size must be at least 50 pixels');
     const x = action.x == null ? rect.x : wa.x + resolvePosition(action.x, wa.width, width);
     const y = action.y == null ? rect.y : wa.y + resolvePosition(action.y, wa.height, height);
-    return {x, y, width, height};
+    return validateRect({x, y, width, height});
 }
 
 function grid(options, count, wa) {
@@ -176,7 +176,21 @@ const LAYOUTS = Object.freeze({grid, columns: grid, rows: grid, cascade});
 
 export function planLayout(options, count, wa) {
     integer(count, 1, MAX_WINDOWS, 'Window count');
-    return LAYOUTS[options.layout](options, count, wa);
+    if (typeof options.layout !== 'string' || !Object.hasOwn(LAYOUTS, options.layout))
+        throw new Error('Unknown layout');
+    return LAYOUTS[options.layout](options, count, wa).map(rect => validateRect(rect));
+}
+
+// GJS marshals coordinates to signed 32-bit integers. Validate before any
+// window is unmaximized or any undo entry is added, including computed edges.
+export function validateRect(rect, minSize = 50) {
+    for (const key of ['x', 'y'])
+        integer(rect[key], -2147483648, 2147483647, key);
+    for (const key of ['width', 'height'])
+        integer(rect[key], minSize, 2147483647, key);
+    integer(rect.x + rect.width, -2147483648, 2147483647, 'Right edge');
+    integer(rect.y + rect.height, -2147483648, 2147483647, 'Bottom edge');
+    return rect;
 }
 
 export function matchesActive(condition, rect, wa, delta) {

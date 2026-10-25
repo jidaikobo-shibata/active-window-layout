@@ -3,8 +3,6 @@
   "description": "Provides a D-Bus API to move and resize the active window within the Work Area, intended for keyboard-driven workflows and external automation.",
   "name": "Active Window Layout",
   "shell-version": [
-    "45",
-    "46",
     "50"
   ],
   "url": "https://github.com/jidaikobo-shibata/active-window-layout",
