@@ -47,27 +47,33 @@ export function parseJSON(json, limit = 65536) {
 }
 
 function descriptor(value, condition = false) {
-    object(value, ['target', 'layout', 'gap', ...GEOMETRY, 'offsetX', 'offsetY',
+    object(value, ['target', 'monitor', 'layout', 'gap', ...GEOMETRY, 'offsetX', 'offsetY',
         ...(condition ? ['tolerance'] : [])], 'placement');
     if (!['active', 'same-app'].includes(value.target))
         throw new Error('Target must be active or same-app');
     if (Object.hasOwn(value, 'tolerance'))
         tolerance(value.tolerance);
+    if (Object.hasOwn(value, 'monitor'))
+        integer(value.monitor, 0, 2147483647, 'Monitor');
     if (value.target === 'active') {
-        object(value, ['target', ...GEOMETRY, ...(condition ? ['tolerance'] : [])], 'active');
-        if (!GEOMETRY.some(key => Object.hasOwn(value, key)))
-            throw new Error('Active placement needs at least one geometry field');
+        object(value, ['target', 'monitor', ...GEOMETRY, ...(condition ? ['tolerance'] : [])], 'active');
+        if (!Object.hasOwn(value, 'monitor') && !GEOMETRY.some(key => Object.hasOwn(value, key)))
+            throw new Error('Active placement needs monitor or at least one geometry field');
         for (const key of GEOMETRY) {
             if (Object.hasOwn(value, key))
                 geometryValue(key, value[key], !condition);
         }
         return {...value};
     }
+    if (condition && !Object.hasOwn(value, 'layout') && Object.hasOwn(value, 'monitor')) {
+        object(value, ['target', 'monitor', 'tolerance'], 'monitor condition');
+        return {...value};
+    }
     const layout = value.layout;
     if (typeof layout !== 'string' || !Object.hasOwn(LAYOUTS, layout))
         throw new Error('Unknown layout');
     const fields = layout === 'cascade' ? [...CASCADE, 'gap'] : ['gap'];
-    object(value, ['target', 'layout', ...fields, ...(condition ? ['tolerance'] : [])], layout);
+    object(value, ['target', 'monitor', 'layout', ...fields, ...(condition ? ['tolerance'] : [])], layout);
     const gap = integer(value.gap ?? 12, 0, 4096, 'Gap');
     // Explicit null is invalid, whereas omitted options receive defaults.
     if (Object.hasOwn(value, 'gap'))
@@ -129,13 +135,15 @@ export function resolvePosition(value, total, size) {
     }
 }
 
-export function planActive(action, rect, wa) {
+export function planActive(action, rect, wa, sourceArea = null) {
     const width = action.width == null ? rect.width : resolveSize(action.width, wa.width);
     const height = action.height == null ? rect.height : resolveSize(action.height, wa.height);
     if (width < 50 || height < 50)
         throw new Error('Resolved size must be at least 50 pixels');
-    const x = action.x == null ? rect.x : wa.x + resolvePosition(action.x, wa.width, width);
-    const y = action.y == null ? rect.y : wa.y + resolvePosition(action.y, wa.height, height);
+    const keptX = sourceArea ? wa.x + Math.max(0, Math.min(rect.x - sourceArea.x, wa.width - width)) : rect.x;
+    const keptY = sourceArea ? wa.y + Math.max(0, Math.min(rect.y - sourceArea.y, wa.height - height)) : rect.y;
+    const x = action.x == null ? keptX : wa.x + resolvePosition(action.x, wa.width, width);
+    const y = action.y == null ? keptY : wa.y + resolvePosition(action.y, wa.height, height);
     return validateRect({x, y, width, height});
 }
 

@@ -132,6 +132,71 @@ def check():
     assert inspect()['stacking'] == grid_stack, inspect()
     assert inspect()['history'] == 1
     print('PASS: grid/cascade after focus change; failed undo retried with original stacking', flush=True)
+    # One conditional call moves/resizes using the destination work area.
+    call('Focus', '(i)', (ids[0],), True)
+    settle()
+    before_monitors = rects()
+    history_before = inspect()['history']
+    assert conditional([
+        {'when': {'target': 'active', 'monitor': 0},
+         'then': {'target': 'active', 'monitor': 1, 'x': 'center', 'y': 'center',
+                  'width': '50%', 'height': '70%'}},
+    ]) == (True,)
+    settle()
+    assert inspect()['windows'][0]['monitor'] == 1
+    target_x, target_y, target_w, target_h = call('GetWorkArea')
+    placed = rects()[ids[0]]
+    assert placed == {'x': target_x + (target_w - target_w//2)//2,
+                      'y': target_y + (target_h - target_h*70//100)//2,
+                      'width': target_w//2, 'height': target_h*70//100}, placed
+    assert inspect()['history'] == history_before + 1
+    assert call('UndoLastOperation') == (True,)
+    settle()
+    expect_same(before_monitors)
+    assert inspect()['windows'][0]['monitor'] == 0
+    assert inspect()['history'] == history_before
+    print('PASS: monitor condition, destination percentages/centering and one-call undo', flush=True)
+
+    # A same-app peer already on the destination is not added to this operation.
+    call('Focus', '(i)', (ids[1],), True)
+    settle()
+    call('MoveToMonitor', '(i)', (1,))
+    settle()
+    peer_rect = rects()[ids[1]]
+    call('Focus', '(i)', (ids[0],), True)
+    settle()
+    assert conditional([
+        {'when': {'target': 'same-app', 'monitor': 0},
+         'then': {'target': 'same-app', 'monitor': 1, 'layout': 'columns'}},
+    ]) == (True,)
+    settle()
+    assert all(w['monitor'] == 1 for w in inspect()['windows'])
+    assert rects()[ids[1]] == peer_rect
+    for window_id in [ids[0], ids[2]]:
+        assert rects()[window_id]['width'] == (target_w - 12)//2
+    call('UndoLastOperation')
+    settle()
+    assert [w['monitor'] for w in inspect()['windows']] == [0, 1, 0]
+    assert rects()[ids[1]] == peer_rect
+    call('UndoLastOperation')
+    settle()
+    expect_same(before_monitors)
+    assert all(w['monitor'] == 0 for w in inspect()['windows'])
+    assert inspect()['history'] == history_before
+    print('PASS: source-group monitor transfer leaves destination peer unchanged', flush=True)
+
+    original_stack = inspect()['stacking']
+    assert conditional([{'then': {'target': 'same-app', 'monitor': 1, 'layout': 'cascade'}}]) == (True,)
+    settle()
+    assert all(w['monitor'] == 1 for w in inspect()['windows'])
+    assert all(r['width'] == target_w*70//100 for r in rects().values())
+    assert call('UndoLastOperation') == (True,)
+    settle()
+    expect_same(before_monitors)
+    assert all(w['monitor'] == 0 for w in inspect()['windows'])
+    assert inspect()['stacking'] == original_stack
+    print('PASS: cascade monitor transfer and grouped monitor/geometry/stack undo', flush=True)
+
     conditional(rules)
     settle()
     call('Close', '(i)', (ids[1],), True)

@@ -114,14 +114,15 @@ class ServiceImpl {
         return this._maximizeFlags(win) !== 0;
     }
 
-    _watchSemanticPlacement(win, x, y, force = false) {
+    _watchSemanticPlacement(win, x, y, force = false, targetMonitor = null) {
         // Numeric coordinates and left/top don't depend on the resulting size.
         const dependsOnSize = value => typeof value === 'string' &&
             value !== 'left' && value !== 'top';
         if (!force && !dependsOnSize(x) && !dependsOnSize(y))
             return;
 
-        const monitor = win.get_monitor();
+        const monitor = targetMonitor ?? win.get_monitor();
+        let arrived = win.get_monitor() === monitor;
         const workspace = global.workspace_manager.get_active_workspace();
         const pending = {idleId: 0, timeoutId: 0, signalIds: []};
         this._placements.set(win, pending);
@@ -131,8 +132,16 @@ class ServiceImpl {
                 return;
             pending.idleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
                 pending.idleId = 0;
-                if (win.get_monitor() !== monitor ||
-                    global.workspace_manager.get_active_workspace() !== workspace ||
+                if (win.get_monitor() !== monitor) {
+                    // Monitor movement may complete after the resize request.
+                    // Wait for its notification, but stop tracking if the window
+                    // leaves the destination after it has arrived there.
+                    if (arrived || targetMonitor === null)
+                        this._cancelPlacement(win);
+                    return GLib.SOURCE_REMOVE;
+                }
+                arrived = true;
+                if (global.workspace_manager.get_active_workspace() !== workspace ||
                     win.is_fullscreen() || this._isMaximized(win)) {
                     this._cancelPlacement(win);
                     return GLib.SOURCE_REMOVE;
@@ -151,6 +160,7 @@ class ServiceImpl {
 
         // Connect before requesting a resize, including synchronous size changes.
         pending.signalIds.push(win.connect('size-changed', queueCorrection));
+        pending.signalIds.push(win.connect('notify::main-monitor', queueCorrection));
         // A delayed Wayland configure can restore the requested position without
         // changing size again. Recheck that position too, until the deadline.
         pending.signalIds.push(win.connect('position-changed', queueCorrection));
@@ -182,14 +192,20 @@ class ServiceImpl {
 
     // Keep the existing two-step move/resize request; semantic placement is
     // corrected separately once the client has applied its size constraints.
-    _applyMoveResizeInWorkArea(win, dx, dy, width = null, height = null, semantic = null) {
+    _applyMoveResizeInWorkArea(win, dx, dy, width = null, height = null, semantic = null, destination = null) {
         this._cancelPlacement(win);
         const workspace = global.workspace_manager.get_active_workspace();
-        const wa = workspace.get_work_area_for_monitor(win.get_monitor());
+        const wa = destination?.wa ?? workspace.get_work_area_for_monitor(win.get_monitor());
+        const moving = destination && destination.monitor !== win.get_monitor();
 
-        if (semantic)
-            this._watchSemanticPlacement(win, semantic.x, semantic.y);
+        if (semantic || moving) {
+            const x = moving ? semantic?.x ?? dx : semantic.x;
+            const y = moving ? semantic?.y ?? dy : semantic.y;
+            this._watchSemanticPlacement(win, x, y, Boolean(moving), destination?.monitor ?? null);
+        }
         this._ensureResizableMovable(win);
+        if (moving)
+            win.move_to_monitor(destination.monitor);
 
         const rect = win.get_frame_rect();
 
@@ -443,7 +459,7 @@ class ServiceImpl {
         if (!state.maximized && !state.fullscreen &&
             global.workspace_manager.get_active_workspace() === state.workspace) {
             const wa = state.workspace.get_work_area_for_monitor(state.monitor);
-            this._watchSemanticPlacement(win, rect.x - wa.x, rect.y - wa.y, true);
+            this._watchSemanticPlacement(win, rect.x - wa.x, rect.y - wa.y, true, state.monitor);
         }
         win.move_resize_frame(true, rect.x, rect.y, rect.width, rect.height);
         if (state.maximized)
@@ -478,8 +494,9 @@ class ServiceImpl {
             windows.sort((a, b) => a === b ? 0 : a === focused ? -1 : b === focused ? 1 :
                 a.get_stable_sequence() - b.get_stable_sequence());
         }
-        const read = win => ({win, rect: this._rect(win), maximized: this._maximizeFlags(win)});
-        return {focused, wa, active: read(focused), activeEligible: eligible(focused),
+        const read = win => ({win, rect: this._rect(win), monitor: win.get_monitor(),
+            maximized: this._maximizeFlags(win)});
+        return {focused, wa, workspace, monitor, active: read(focused), activeEligible: eligible(focused),
             windows: windows.map(read)};
     }
 
@@ -487,8 +504,14 @@ class ServiceImpl {
         const delta = condition.tolerance ?? defaultTolerance;
         if (condition.target === 'active')
             return context.activeEligible &&
+                (condition.monitor === undefined || condition.monitor === context.active.monitor) &&
                 Layout.matchesActive(condition, context.active.rect, context.wa, delta);
-        if (!context.windows.length || context.windows.some(state => state.maximized))
+        if (!context.windows.length || (condition.monitor !== undefined &&
+            context.windows.some(state => state.monitor !== condition.monitor)))
+            return false;
+        if (condition.layout === undefined)
+            return true;
+        if (context.windows.some(state => state.maximized))
             return false;
         let cells;
         try {
@@ -501,21 +524,26 @@ class ServiceImpl {
     }
 
     _plan(action, context) {
+        const monitor = action.monitor ?? context.monitor;
+        if (monitor >= global.display.get_n_monitors())
+            throw new Error(`Monitor ${monitor} does not exist`);
+        const moving = monitor !== context.monitor;
+        const wa = moving ? context.workspace.get_work_area_for_monitor(monitor) : context.wa;
         if (action.target === 'active') {
             if (!context.activeEligible)
                 return [];
-            const rect = Layout.planActive(action, context.active.rect, context.wa);
-            if (Layout.sameRect(rect, context.active.rect) && !context.active.maximized)
+            const rect = Layout.planActive(action, context.active.rect, wa, moving ? context.wa : null);
+            if (!moving && Layout.sameRect(rect, context.active.rect) && !context.active.maximized)
                 return [];
-            return [{win: context.focused, rect,
+            return [{win: context.focused, rect, monitor, wa,
                 semantic: {x: action.x ?? null, y: action.y ?? null}}];
         }
         if (!context.windows.length)
             return [];
-        const cells = Layout.planLayout(action, context.windows.length, context.wa);
+        const cells = Layout.planLayout(action, context.windows.length, wa);
         const states = action.layout === 'cascade' ?
             [...context.windows.slice(1), context.windows[0]] : context.windows;
-        return states.map((state, index) => ({win: state.win, rect: cells[index],
+        return states.map((state, index) => ({win: state.win, rect: cells[index], monitor, wa,
             raise: action.layout === 'cascade'}));
     }
 
@@ -525,9 +553,10 @@ class ServiceImpl {
         for (const {rect} of plan)
             Layout.validateRect(rect);
         this._perform(plan.map(item => item.win), () => {
-            for (const {win, rect, semantic, raise} of plan) {
-                this._applyMoveResizeInWorkArea(win, rect.x - wa.x, rect.y - wa.y,
-                    rect.width, rect.height, semantic);
+            for (const {win, rect, semantic, raise, monitor, wa: targetArea = wa} of plan) {
+                const destination = monitor === undefined ? null : {monitor, wa: targetArea};
+                this._applyMoveResizeInWorkArea(win, rect.x - targetArea.x, rect.y - targetArea.y,
+                    rect.width, rect.height, semantic, destination);
                 if (raise)
                     win.raise();
             }

@@ -32,7 +32,7 @@ class Signals {
     }
 }
 
-function fixture({synchronous = false, refuse = false, rounding = true, rect = {}} = {}) {
+function fixture({synchronous = false, refuse = false, rounding = true, deferredMonitor = false, rect = {}} = {}) {
     let now = 0;
     let nextId = 1;
     const sources = new Map();
@@ -64,7 +64,8 @@ function fixture({synchronous = false, refuse = false, rounding = true, rect = {
         Source: {remove: id => assert.ok(sources.delete(id), `unknown source ${id}`)},
     };
     const wa = {x: 1920, y: 32, width: 1920, height: 1048};
-    const workspace = {get_work_area_for_monitor: () => wa};
+    const workAreas = new Map([[1, wa], [0, {x: 0, y: 24, width: 1600, height: 876}]]);
+    const workspace = {get_work_area_for_monitor: monitor => workAreas.get(monitor)};
     let activeWorkspace = workspace;
     const win = new Signals();
     Object.assign(win, {
@@ -74,6 +75,7 @@ function fixture({synchronous = false, refuse = false, rounding = true, rect = {
         fullscreen: false,
         moves: [],
         requests: [],
+        monitorMoves: [],
         get_monitor() { return this.monitor; },
         get_frame_rect() { return {...this.rect}; },
         get_maximize_flags() { return this.maximized; },
@@ -86,7 +88,18 @@ function fixture({synchronous = false, refuse = false, rounding = true, rect = {
         make_fullscreen() { this.fullscreen = true; },
         get_workspace: () => workspace,
         raise() {},
-        move_to_monitor(monitor) { this.monitor = monitor; },
+        move_to_monitor(monitor) {
+            this.monitorMoves.push(monitor);
+            const arrive = () => {
+                this.monitor = monitor;
+                this.emit('notify::main-monitor');
+                return false;
+            };
+            if (deferredMonitor)
+                add(60, arrive);
+            else
+                arrive();
+        },
         move_frame(_userOp, x, y) {
             this.moves.push({x, y});
             Object.assign(this.rect, {x, y});
@@ -139,7 +152,7 @@ function fixture({synchronous = false, refuse = false, rounding = true, rect = {
     vm.runInNewContext(`${historySource}\n${source}\nthis.Service = ServiceImpl;`, context);
     const service = new context.Service();
     return {
-        service, win, display, wa, sources, advance, app, tracker, logs,
+        service, win, display, wa, sources, advance, app, tracker, logs, workAreas,
         changeWorkspace() { activeWorkspace = {}; },
         cleanup() {
             advance(2000);
@@ -411,6 +424,7 @@ function arrangementFixture(count, options = {}) {
         win.rect = {...f.win.rect};
         win.requests = [];
         win.moves = [];
+        win.monitorMoves = [];
         win.get_stable_sequence = () => i + 1;
         windows.push(win);
     }
@@ -1041,5 +1055,153 @@ test('bounded history eviction releases peers retained only for a pending stacki
     assert.equal(f.service._history.size, 20);
     assert.equal(f.windows[1].handlers.size, 0);
     assert.equal(f.windows[2].handlers.size, 0);
+    f.cleanup();
+});
+
+test('monitor condition and destination use target area percentages and a single undo entry', () => {
+    const f = fixture(exact);
+    const original = {...f.win.rect};
+    const rules = ruleSet([
+        {when: {target: 'active', monitor: 1}, then: {target: 'active', monitor: 0,
+            x: 'center', y: 'center', width: '50%', height: '90%'}},
+    ]);
+    assert.equal(f.service.MoveResizeConditional(rules), true);
+    f.advance(50);
+    assert.equal(f.win.monitor, 0);
+    assert.deepEqual(f.win.rect, {x: 400, y: 68, width: 800, height: 788});
+    assert.equal(f.service._history.size, 1);
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    assert.equal(f.win.monitor, 1);
+    assert.deepEqual(f.win.rect, original);
+    f.cleanup();
+});
+
+test('monitor conditions are exact, can combine geometry and ignore tolerance for the number', () => {
+    const f = fixture(exact);
+    assert.equal(f.service.MoveResizeConditional(JSON.stringify({tolerance: 4096, rules: [
+        {when: {target: 'active', monitor: 0}, then: {target: 'active', width: 900}},
+        {when: {target: 'active', monitor: 1, width: 800}, then: {target: 'active', width: 1000}},
+    ]})), true);
+    assert.equal(f.win.rect.width, 1000);
+    assert.equal(f.win.monitorMoves.length, 0, 'omitted destination keeps current monitor');
+    f.cleanup();
+});
+
+test('monitor-only actions preserve size and transfer clamped work-area-relative positions', () => {
+    for (const [rect, expected] of [
+        [{x: 2000, y: 80}, {x: 80, y: 72, width: 800, height: 600}],
+        [{x: 3500, y: 900}, {x: 800, y: 300, width: 800, height: 600}],
+    ]) {
+        const f = fixture({...exact, rect});
+        assert.equal(f.service.MoveResizeConditional(ruleSet([
+            {then: {target: 'active', monitor: 0}},
+        ])), true);
+        f.advance(50);
+        assert.deepEqual(f.win.rect, expected);
+        assert.equal(f.win.monitor, 0);
+        f.cleanup();
+    }
+});
+
+test('moving a maximized window with monitor-only condition is supported', () => {
+    const f = fixture(exact);
+    f.win.maximized = 3;
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {when: {target: 'same-app', monitor: 1}, then: {target: 'active', monitor: 0,
+            x: 'center', y: 'center', width: 1000, height: 700}},
+    ])), true);
+    assert.equal(f.win.maximized, 0);
+    assert.equal(f.win.monitor, 0);
+    f.cleanup();
+});
+
+test('same-app movement snapshots the source group and leaves target monitor peers untouched', () => {
+    const f = arrangementFixture(4, exact);
+    f.windows[3].monitor = 0;
+    const before = f.windows.map(win => ({...win.rect}));
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {when: {target: 'same-app', monitor: 1}, then: {target: 'same-app', monitor: 0,
+            layout: 'columns', gap: 10}},
+    ])), true);
+    f.advance(50);
+    assert.ok(f.windows.slice(0, 3).every(win => win.monitor === 0));
+    assert.deepEqual(f.windows[0].rect, {x: 0, y: 24, width: 526, height: 876});
+    assert.deepEqual(f.windows[2].rect, {x: 1073, y: 24, width: 527, height: 876});
+    assert.equal(f.windows[3].requests.length, 0);
+    assert.equal(f.service._history.size, 1);
+    f.service.UndoLastOperation();
+    f.advance(50);
+    assert.ok(f.windows.slice(0, 3).every(win => win.monitor === 1));
+    assert.equal(f.windows[3].monitor, 0);
+    assert.deepEqual(f.windows.map(win => win.rect), before);
+    f.cleanup();
+});
+
+test('monitor and layout conditions match the current area before selecting another monitor', () => {
+    const f = arrangementFixture(2, exact);
+    f.service.ArrangeSameApp('{}');
+    f.advance(50);
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {when: {target: 'same-app', monitor: 0, layout: 'grid'}, then: {target: 'active', width: 900}},
+        {when: {target: 'same-app', monitor: 1, layout: 'grid'}, then: {target: 'same-app',
+            monitor: 0, layout: 'cascade', width: '50%', height: '70%'}},
+    ])), true);
+    f.advance(50);
+    assert.equal(f.win.monitor, 0);
+    assert.equal(f.win.rect.width, 800);
+    assert.equal(f.win.rect.height, 613);
+    f.cleanup();
+});
+
+test('bad monitor types and nonexistent destinations are rejected before any mutation', () => {
+    const f = fixture(exact);
+    f.win.maximized = 3;
+    for (const monitor of [-1, .5, '0', null, [0], {}, 1e100]) {
+        for (const key of ['when', 'then']) {
+            assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+                {then: {target: 'active', width: 1000}},
+                {[key]: {target: 'active', monitor}, ...(key === 'when' ?
+                    {then: {target: 'active', width: 1000}} : {})},
+            ])));
+        }
+    }
+    assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', monitor: 2, width: 1000}},
+    ])));
+    assert.equal(f.win.maximized, 3);
+    assert.equal(f.service._history.size, 0);
+    assert.equal(f.win.requests.length, 0);
+    assert.equal(f.win.monitorMoves.length, 0);
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {when: {target: 'active', monitor: 2}, then: {target: 'active', width: 1000}},
+    ])), false, 'a missing monitor in a condition simply does not match');
+    f.cleanup();
+});
+
+test('an impossible destination layout is rejected before moving the first window', () => {
+    const f = arrangementFixture(3, exact);
+    f.workAreas.set(0, {x: 0, y: 0, width: 80, height: 60});
+    assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'same-app', monitor: 0, layout: 'grid'}},
+    ])));
+    assert.ok(f.windows.every(win => win.monitor === 1 && win.monitorMoves.length === 0));
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('semantic alignment waits for asynchronous monitor arrival and uses the destination size', () => {
+    const f = fixture({deferredMonitor: true});
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', monitor: 0, x: 'right', y: 'bottom', width: 1000, height: 700}},
+    ])), true);
+    f.advance(50);
+    assert.equal(f.win.monitor, 1, 'monitor transfer is still pending');
+    assert.equal(f.service._placements.size, 1);
+    f.advance(20);
+    const target = f.workAreas.get(0);
+    assert.equal(f.win.monitor, 0);
+    assert.equal(f.win.rect.x + f.win.rect.width, target.x + target.width);
+    assert.equal(f.win.rect.y + f.win.rect.height, target.y + target.height);
     f.cleanup();
 });
