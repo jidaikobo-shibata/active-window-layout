@@ -564,8 +564,11 @@ class ServiceImpl {
                 ...plan.filter(item => item.raise && !item.front),
                 ...plan.filter(item => item.raise && item.front),
             ];
+            // Keep the workspace's next-focus order aligned with the visible
+            // stack, without activating each window or moving keyboard focus.
+            const workspace = global.workspace_manager.get_active_workspace();
             for (const {win} of backToFront)
-                win.raise();
+                win.raise_and_make_recent_on_workspace(workspace);
         }, plan.some(item => item.raise));
         return true;
     }

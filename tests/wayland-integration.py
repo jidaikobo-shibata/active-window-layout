@@ -235,6 +235,46 @@ def check():
     assert inspect()['windows'][0]['monitor'] == 0
     expect_same(previous)
     print('PASS: legacy semantic placement and monitor move/undo', flush=True)
+    # Reproduce the reported close sequence with another app between group
+    # windows in the workspace's recent-use order, then close the group in turn.
+    for layout in ['grid', 'columns', 'rows', 'cascade']:
+        missing = 3 - len(inspect()['windows'])
+        for _ in range(missing):
+            bus.call_sync('org.example.AwlTest', '/org/example/AwlTest', 'org.gtk.Actions',
+                          'Activate', GLib.Variant('(sava{sv})', ('new-window', [], {})),
+                          None, Gio.DBusCallFlags.NONE, 5000, None)
+        for _ in range(50):
+            group = inspect()['windows']
+            if len(group) == 3 and all(w['rect']['width'] > 0 for w in group):
+                break
+            time.sleep(.1)
+        else:
+            raise AssertionError('Could not create three close-test windows')
+        group_ids = [w['id'] for w in group]
+        for window in group:
+            if window['monitor'] != 0:
+                call('Focus', '(i)', (window['id'],), True)
+                settle()
+                call('MoveToMonitor', '(i)', (0,))
+                settle()
+        other_id = inspect()['otherWindows'][0]['id']
+        for window_id in [group_ids[0], other_id, group_ids[1], other_id, group_ids[2]]:
+            call('Focus', '(i)', (window_id,), True)
+            settle()
+        assert call('ArrangeSameApp', '(s)', (json.dumps({'layout': layout}),)) == (True,)
+        settle()
+        arranged = inspect()
+        assert next(w['id'] for w in arranged['windows'] if w['focus']) == group_ids[2]
+        for remaining in [3, 2, 1]:
+            current = inspect()
+            assert len(current['windows']) == remaining, current
+            focused = [w for w in current['windows'] if w['focus']]
+            assert len(focused) == 1, ('focus left group while windows remain', layout, current)
+            call('Close', '(i)', (focused[0]['id'],), True)
+            settle()
+        current = inspect()
+        assert not current['windows'] and current['otherWindows'][0]['focus'], current
+        print('PASS: '+layout+' closes all group windows before switching to the other app', flush=True)
     print('INTEGRATION PASSED', flush=True)
 
 
@@ -254,15 +294,24 @@ def main():
     }))
     (root / 'gtk.py').write_text("""import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk
+from gi.repository import Gtk, Gio
 app = Gtk.Application(application_id='org.example.AwlTest')
+serial = 0
+def new_window(app):
+    global serial
+    serial += 1
+    win = Gtk.ApplicationWindow(application=app, title=f'AWL Test {serial}')
+    win.set_default_size(800+(serial-1)*50, 600+(serial-1)*20)
+    win.set_child(Gtk.Label(label=f'Test window {serial}'))
+    win.present()
 def activate(app):
     for i in range(3):
-        win = Gtk.ApplicationWindow(application=app, title=f'AWL Test {i+1}')
-        win.set_default_size(800+i*50, 600+i*20)
-        win.set_child(Gtk.Label(label=f'Test window {i+1}'))
-        win.present()
+        new_window(app)
+action = Gio.SimpleAction.new('new-window', None)
+action.connect('activate', lambda *_: new_window(app))
+app.add_action(action)
 app.connect('activate', activate)
+app.hold()
 app.run(None)
 """)
     (root / 'other-gtk.py').write_text((root / 'gtk.py').read_text()

@@ -67,6 +67,7 @@ function fixture({synchronous = false, refuse = false, rounding = true, deferred
     const workAreas = new Map([[1, wa], [0, {x: 0, y: 24, width: 1600, height: 876}]]);
     const workspace = {get_work_area_for_monitor: monitor => workAreas.get(monitor)};
     let activeWorkspace = workspace;
+    const recentCalls = [];
     const win = new Signals();
     Object.assign(win, {
         rect: {x: 2000, y: 80, width: 800, height: 600, ...rect},
@@ -88,6 +89,10 @@ function fixture({synchronous = false, refuse = false, rounding = true, deferred
         make_fullscreen() { this.fullscreen = true; },
         get_workspace: () => workspace,
         raise() {},
+        raise_and_make_recent_on_workspace(workspace) {
+            recentCalls.push({win: this, workspace});
+            this.raise();
+        },
         move_to_monitor(monitor) {
             this.monitorMoves.push(monitor);
             const arrive = () => {
@@ -152,7 +157,7 @@ function fixture({synchronous = false, refuse = false, rounding = true, deferred
     vm.runInNewContext(`${historySource}\n${source}\nthis.Service = ServiceImpl;`, context);
     const service = new context.Service();
     return {
-        service, win, display, wa, sources, advance, app, tracker, logs, workAreas,
+        service, win, display, wa, sources, advance, app, tracker, logs, workAreas, recentCalls,
         changeWorkspace() { activeWorkspace = {}; },
         cleanup() {
             advance(2000);
@@ -1240,5 +1245,48 @@ test('conditional same-app grid raises the group, while an active-only resize do
         {then: {target: 'active', width: 1000}},
     ])), true);
     assert.equal(raised.length, 0);
+    f.cleanup();
+});
+
+for (const layout of ['grid', 'columns', 'rows', 'cascade']) {
+    test(`${layout} makes the whole group recent so closing windows stays in that group`, () => {
+        const f = arrangementFixture(3, exact);
+        const other = {app: 'other', raise() {}};
+        let focused = f.win;
+        // Another app is more recent than the two inactive app windows.
+        let mru = [f.win, other, f.windows[1], f.windows[2]];
+        f.display.get_focus_window = () => focused;
+        f.windows.forEach(win => {
+            win.activate = () => assert.fail('must preserve keyboard focus');
+            win.raise_and_make_recent_on_workspace = workspace => {
+                assert.equal(workspace, f.win.get_workspace());
+                win.raise();
+                mru = [win, ...mru.filter(item => item !== win)];
+            };
+        });
+        f.service.ArrangeSameApp(JSON.stringify({layout}));
+        assert.equal(focused, f.win);
+        assert.deepEqual(mru, [f.win, f.windows[2], f.windows[1], other]);
+        for (let remaining = 3; remaining > 0; remaining--) {
+            assert.ok(f.windows.includes(focused), 'do not switch apps while group windows remain');
+            const closing = focused;
+            closing.emit('unmanaged');
+            mru = mru.filter(win => win !== closing);
+            focused = mru[0];
+        }
+        assert.equal(focused, other);
+        f.cleanup();
+    });
+}
+
+test('single-window operations and undo do not rewrite the workspace usage history', () => {
+    const f = arrangementFixture(3, exact);
+    f.service.MoveResizeSemantic('center', 'center', '1000', '700');
+    assert.equal(f.recentCalls.length, 0);
+    f.service.ArrangeSameApp('{}');
+    assert.deepEqual(f.recentCalls.map(item => item.win), [f.windows[1], f.windows[2], f.win]);
+    f.recentCalls.length = 0;
+    f.service.UndoLastOperation();
+    assert.equal(f.recentCalls.length, 0, 'undo restores stacking without rewriting MRU');
     f.cleanup();
 });
