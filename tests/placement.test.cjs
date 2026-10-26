@@ -1205,3 +1205,40 @@ test('semantic alignment waits for asynchronous monitor arrival and uses the des
     assert.equal(f.win.rect.y + f.win.rect.height, target.y + target.height);
     f.cleanup();
 });
+
+for (const layout of ['grid', 'columns', 'rows', 'cascade']) {
+    test(`${layout} brings the app group above other apps with the active window on top`, () => {
+        const f = arrangementFixture(3, exact);
+        const other = {app: 'other'};
+        let stacking = [f.win, f.windows[1], other, f.windows[2]];
+        const originalAppOrder = stacking.filter(win => win !== other);
+        f.display.sort_windows_by_stacking = windows => stacking.filter(win => windows.includes(win));
+        f.windows.forEach(win => {
+            win.raise = () => { stacking = [...stacking.filter(item => item !== win), win]; };
+            win.activate = () => assert.fail('arrangement must not activate a window');
+        });
+        assert.equal(f.service.ArrangeSameApp(JSON.stringify({layout})), true);
+        assert.deepEqual(stacking, [other, f.windows[1], f.windows[2], f.win]);
+        assert.equal(f.display.get_focus_window(), f.win);
+        assert.equal(f.service._history.size, 1);
+        f.service.UndoLastOperation();
+        assert.deepEqual(stacking.filter(win => win !== other), originalAppOrder);
+        f.cleanup();
+    });
+}
+
+test('conditional same-app grid raises the group, while an active-only resize does not', () => {
+    const f = arrangementFixture(3, exact);
+    const raised = [];
+    f.windows.forEach(win => { win.raise = () => raised.push(win); });
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'same-app', layout: 'grid'}},
+    ])), true);
+    assert.deepEqual(raised, [f.windows[1], f.windows[2], f.win]);
+    raised.length = 0;
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', width: 1000}},
+    ])), true);
+    assert.equal(raised.length, 0);
+    f.cleanup();
+});

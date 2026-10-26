@@ -51,7 +51,8 @@ def check():
     for _ in range(150):
         try:
             state = inspect()
-            if (len(state['windows']) == 3 and state['history'] is not None and
+            if (len(state['windows']) == 3 and len(state['otherWindows']) == 1 and
+                    state['history'] is not None and
                     all(w['rect']['width'] > 0 for w in state['windows'])):
                 break
         except GLib.Error:
@@ -64,6 +65,22 @@ def check():
     call('Focus', '(i)', (ids[0],), True)
     settle()
     assert inspect()['windows'][0]['focus']
+    other = inspect()['otherWindows'][0]
+    assert other['app'] != inspect()['windows'][0]['app']
+    for layout in ['grid', 'columns', 'rows', 'cascade']:
+        call('Raise', '(i)', (other['id'],), True)
+        settle()
+        assert inspect()['allStacking'][-1] == other['id']
+        assert call('ArrangeSameApp', '(s)', (json.dumps({'layout': layout}),)) == (True,)
+        settle()
+        arranged = inspect()
+        assert set(arranged['allStacking'][-3:]) == set(ids), arranged
+        assert arranged['allStacking'][-1] == ids[0], arranged
+        assert arranged['windows'][0]['focus'], arranged
+        assert arranged['otherWindows'][0]['rect'] == other['rect']
+        assert call('UndoLastOperation') == (True,)
+        settle()
+    print('PASS: every layout raises the app group above another app and preserves focus', flush=True)
     for window_id in ids[:2]:
         call('Maximize', '(i)', (window_id,), True)
     settle()
@@ -248,6 +265,9 @@ def activate(app):
 app.connect('activate', activate)
 app.run(None)
 """)
+    (root / 'other-gtk.py').write_text((root / 'gtk.py').read_text()
+        .replace('org.example.AwlTest', 'org.example.AwlOther')
+        .replace('AWL Test', 'AWL Other').replace('range(3)', 'range(1)'))
     (root / 'session.sh').write_text('''#!/bin/bash
 set -euo pipefail
 gnome-extensions install "$AWL_TEST_ROOT/packages/active-window-layout@jidaikobo.shibata.shell-extension.zip"
@@ -259,7 +279,8 @@ gnome-shell --headless --wayland --no-x11 \\
     --wayland-display=awl-test >"$AWL_TEST_ROOT/shell.log" 2>&1 &
 shell_pid=$!
 app_pid=''
-trap 'if [ -n "$app_pid" ]; then kill "$app_pid" 2>/dev/null || true; fi; kill "$shell_pid" 2>/dev/null || true' EXIT
+other_pid=''
+trap 'if [ -n "$other_pid" ]; then kill "$other_pid" 2>/dev/null || true; fi; if [ -n "$app_pid" ]; then kill "$app_pid" 2>/dev/null || true; fi; kill "$shell_pid" 2>/dev/null || true' EXIT
 for i in {1..100}; do
     if [ -S "$XDG_RUNTIME_DIR/awl-test" ]; then break; fi
     sleep .2
@@ -268,6 +289,8 @@ export WAYLAND_DISPLAY=awl-test
 export GDK_BACKEND=wayland
 /usr/bin/python3 "$AWL_TEST_ROOT/gtk.py" >"$AWL_TEST_ROOT/app.log" 2>&1 &
 app_pid=$!
+/usr/bin/python3 "$AWL_TEST_ROOT/other-gtk.py" >"$AWL_TEST_ROOT/other-app.log" 2>&1 &
+other_pid=$!
 /usr/bin/python3 "$AWL_TEST_SCRIPT" --check
 ''')
     env = os.environ.copy()

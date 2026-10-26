@@ -1,4 +1,4 @@
-// One entry per public operation. A cascade keeps its full stacking snapshot
+// One entry per public operation. An arrangement keeps its full stacking snapshot
 // until geometry restoration and the final stacking pass have both completed.
 export class OperationHistory {
     constructor(limit = 20) {

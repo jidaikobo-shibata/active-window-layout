@@ -544,7 +544,7 @@ class ServiceImpl {
         const states = action.layout === 'cascade' ?
             [...context.windows.slice(1), context.windows[0]] : context.windows;
         return states.map((state, index) => ({win: state.win, rect: cells[index], monitor, wa,
-            raise: action.layout === 'cascade'}));
+            raise: true, front: state.win === context.focused}));
     }
 
     _executePlan(plan, wa) {
@@ -553,13 +553,19 @@ class ServiceImpl {
         for (const {rect} of plan)
             Layout.validateRect(rect);
         this._perform(plan.map(item => item.win), () => {
-            for (const {win, rect, semantic, raise, monitor, wa: targetArea = wa} of plan) {
+            for (const {win, rect, semantic, monitor, wa: targetArea = wa} of plan) {
                 const destination = monitor === undefined ? null : {monitor, wa: targetArea};
                 this._applyMoveResizeInWorkArea(win, rect.x - targetArea.x, rect.y - targetArea.y,
                     rect.width, rect.height, semantic, destination);
-                if (raise)
-                    win.raise();
             }
+            // Keep geometry order independent of stacking order: grid's active
+            // window stays in the first cell but must be raised last.
+            const backToFront = [
+                ...plan.filter(item => item.raise && !item.front),
+                ...plan.filter(item => item.raise && item.front),
+            ];
+            for (const {win} of backToFront)
+                win.raise();
         }, plan.some(item => item.raise));
         return true;
     }
