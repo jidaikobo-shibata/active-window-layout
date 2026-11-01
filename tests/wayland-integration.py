@@ -235,9 +235,27 @@ def check():
     assert inspect()['windows'][0]['monitor'] == 0
     expect_same(previous)
     print('PASS: legacy semantic placement and monitor move/undo', flush=True)
+    # Resize one window while fronting peers, then undo without resizing peers.
+    group = inspect()['windows']
+    active_id = group[0]['id']
+    call('Focus', '(i)', (active_id,), True)
+    settle()
+    before = rects()
+    assert conditional([{'then': {'target': 'active', 'width': 1000, 'height': 700,
+                                  'bringToFront': 'same-app'}}]) == (True,)
+    settle()
+    current = inspect()
+    for window in current['windows']:
+        if window['id'] != active_id:
+            assert window['rect'] == before[window['id']], current
+    assert next(w['id'] for w in current['windows'] if w['focus']) == active_id
+    assert call('UndoLastOperation') == (True,)
+    settle()
+    expect_same(before)
+    print('PASS: active resize fronts peers without resizing them and undo restores geometry', flush=True)
     # Reproduce the reported close sequence with another app between group
     # windows in the workspace's recent-use order, then close the group in turn.
-    for layout in ['grid', 'columns', 'rows', 'cascade']:
+    for layout in ['grid', 'columns', 'rows', 'cascade', 'resize-front']:
         missing = 3 - len(inspect()['windows'])
         for _ in range(missing):
             bus.call_sync('org.example.AwlTest', '/org/example/AwlTest', 'org.gtk.Actions',
@@ -261,7 +279,11 @@ def check():
         for window_id in [group_ids[0], other_id, group_ids[1], other_id, group_ids[2]]:
             call('Focus', '(i)', (window_id,), True)
             settle()
-        assert call('ArrangeSameApp', '(s)', (json.dumps({'layout': layout}),)) == (True,)
+        if layout == 'resize-front':
+            assert conditional([{'then': {'target': 'active', 'width': 1000,
+                                          'bringToFront': 'same-app'}}]) == (True,)
+        else:
+            assert call('ArrangeSameApp', '(s)', (json.dumps({'layout': layout}),)) == (True,)
         settle()
         arranged = inspect()
         assert next(w['id'] for w in arranged['windows'] if w['focus']) == group_ids[2]

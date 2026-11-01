@@ -48,15 +48,18 @@ export function parseJSON(json, limit = 65536) {
 
 function descriptor(value, condition = false) {
     object(value, ['target', 'monitor', 'layout', 'gap', ...GEOMETRY, 'offsetX', 'offsetY',
-        ...(condition ? ['tolerance'] : [])], 'placement');
+        ...(condition ? ['tolerance'] : ['bringToFront'])], 'placement');
     if (!['active', 'same-app'].includes(value.target))
         throw new Error('Target must be active or same-app');
+    if (Object.hasOwn(value, 'bringToFront') &&
+        (value.target !== 'active' || value.bringToFront !== 'same-app'))
+        throw new Error('bringToFront must be same-app on an active action');
     if (Object.hasOwn(value, 'tolerance'))
         tolerance(value.tolerance);
     if (Object.hasOwn(value, 'monitor'))
         integer(value.monitor, 0, 2147483647, 'Monitor');
     if (value.target === 'active') {
-        object(value, ['target', 'monitor', ...GEOMETRY, ...(condition ? ['tolerance'] : [])], 'active');
+        object(value, ['target', 'monitor', ...GEOMETRY, ...(condition ? ['tolerance'] : ['bringToFront'])], 'active');
         if (!Object.hasOwn(value, 'monitor') && !GEOMETRY.some(key => Object.hasOwn(value, key)))
             throw new Error('Active placement needs monitor or at least one geometry field');
         for (const key of GEOMETRY) {

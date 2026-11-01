@@ -383,12 +383,12 @@ class ServiceImpl {
 
     // Capture every target before mutating any of them. A partially failed
     // operation remains undoable; no automatic rollback races Wayland replies.
-    _perform(windows, execute, restoreStack = false) {
+    _perform(windows, execute, restoreStack = false, geometryWindows = windows) {
         const ordered = restoreStack ? global.display.sort_windows_by_stacking(windows) : windows;
         const states = ordered.map(win => ({
             win, rect: this._rect(win), monitor: win.get_monitor(),
             workspace: win.get_workspace(), maximized: this._maximizeFlags(win),
-            fullscreen: win.is_fullscreen(), restoreStack,
+            fullscreen: win.is_fullscreen(), restoreStack, stackOnly: !geometryWindows.includes(win),
         }));
         this._history.push(states);
         execute();
@@ -533,10 +533,22 @@ class ServiceImpl {
             if (!context.activeEligible)
                 return [];
             const rect = Layout.planActive(action, context.active.rect, wa, moving ? context.wa : null);
-            if (!moving && Layout.sameRect(rect, context.active.rect) && !context.active.maximized)
-                return [];
-            return [{win: context.focused, rect, monitor, wa,
+            const unchanged = !moving && Layout.sameRect(rect, context.active.rect) && !context.active.maximized;
+            const plan = unchanged ? [] : [{win: context.focused, rect, monitor, wa,
                 semantic: {x: action.x ?? null, y: action.y ?? null}}];
+            if (action.bringToFront === 'same-app') {
+                // Snapshot the source group; peers are raised without geometry changes.
+                for (const state of context.windows) {
+                    let item = plan.find(entry => entry.win === state.win);
+                    if (!item) {
+                        item = {win: state.win, stackOnly: true};
+                        plan.push(item);
+                    }
+                    item.raise = true;
+                    item.front = state.win === context.focused;
+                }
+            }
+            return plan;
         }
         if (!context.windows.length)
             return [];
@@ -550,10 +562,14 @@ class ServiceImpl {
     _executePlan(plan, wa) {
         if (!plan.length)
             return false;
-        for (const {rect} of plan)
-            Layout.validateRect(rect);
+        for (const item of plan) {
+            if (!item.stackOnly)
+                Layout.validateRect(item.rect);
+        }
         this._perform(plan.map(item => item.win), () => {
-            for (const {win, rect, semantic, monitor, wa: targetArea = wa} of plan) {
+            for (const {win, rect, semantic, monitor, stackOnly, wa: targetArea = wa} of plan) {
+                if (stackOnly)
+                    continue;
                 const destination = monitor === undefined ? null : {monitor, wa: targetArea};
                 this._applyMoveResizeInWorkArea(win, rect.x - targetArea.x, rect.y - targetArea.y,
                     rect.width, rect.height, semantic, destination);
@@ -569,7 +585,7 @@ class ServiceImpl {
             const workspace = global.workspace_manager.get_active_workspace();
             for (const {win} of backToFront)
                 win.raise_and_make_recent_on_workspace(workspace);
-        }, plan.some(item => item.raise));
+        }, plan.some(item => item.raise), plan.filter(item => !item.stackOnly).map(item => item.win));
         return true;
     }
 
@@ -582,7 +598,8 @@ class ServiceImpl {
     MoveResizeConditional(json) {
         const config = Layout.parseRules(json);
         const needsApp = config.rules.some(rule =>
-            rule.when?.target === 'same-app' || rule.then.target === 'same-app');
+            rule.when?.target === 'same-app' || rule.then.target === 'same-app' ||
+            rule.then.bringToFront === 'same-app');
         const context = this._context(needsApp);
         if (!context)
             return false;

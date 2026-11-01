@@ -14,7 +14,10 @@ export class OperationHistory {
     push(states) {
         if (!states.length)
             return;
-        this._entries.push({states: [...states], stacking: states.filter(state => state.restoreStack)});
+        this._entries.push({
+            states: states.filter(state => !state.stackOnly),
+            stacking: states.filter(state => state.restoreStack),
+        });
         if (this._entries.length > this._limit)
             this._entries.shift();
         this._syncSignals();

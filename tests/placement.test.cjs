@@ -1290,3 +1290,82 @@ test('single-window operations and undo do not rewrite the workspace usage histo
     assert.equal(f.recentCalls.length, 0, 'undo restores stacking without rewriting MRU');
     f.cleanup();
 });
+
+test('active resize optionally fronts source app peers without changing their geometry, including undo', () => {
+    const f = arrangementFixture(3, exact);
+    const original = {...f.win.rect};
+    const peers = f.windows.slice(1).map(win => ({...win.rect}));
+    f.windows[1].maximized = 3;
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', width: 1000, height: 700, bringToFront: 'same-app'}},
+    ])), true);
+    f.advance(50);
+    assert.equal(f.win.rect.width, 1000);
+    assert.deepEqual(f.recentCalls.map(item => item.win), [f.windows[1], f.windows[2], f.win]);
+    assert.equal(f.display.get_focus_window(), f.win);
+    assert.equal(f.service._history.peek().length, 1);
+    assert.equal(f.service._history.peekOperation().stacking.length, 3);
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    assert.deepEqual(f.win.rect, original);
+    f.windows.slice(1).forEach((win, index) => {
+        assert.deepEqual(win.rect, peers[index]);
+        assert.equal(win.requests.length, 0);
+    });
+    assert.equal(f.windows[1].maximized, 3);
+    f.cleanup();
+});
+
+test('fronting still executes when the active geometry already matches and is undoable', () => {
+    const f = arrangementFixture(3, exact);
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', width: f.win.rect.width, bringToFront: 'same-app'}},
+    ])), true);
+    assert.equal(f.recentCalls.length, 3);
+    assert.equal(f.service._history.peek().length, 0);
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.windows.forEach(win => assert.equal(win.requests.length, 0));
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('fronting option rejects invalid values, conditions and same-app layout actions before mutation', () => {
+    const f = arrangementFixture(3, exact);
+    for (const value of [null, true, 'active', '', 1]) {
+        assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+            {then: {target: 'active', width: 1000, bringToFront: value}},
+        ])));
+    }
+    assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+        {when: {target: 'active', width: 1000, bringToFront: 'same-app'},
+            then: {target: 'active', width: 1200}},
+    ])));
+    assert.throws(() => f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'same-app', layout: 'grid', bringToFront: 'same-app'}},
+    ])));
+    assert.equal(f.service._history.size, 0);
+    assert.equal(f.recentCalls.length, 0);
+    f.cleanup();
+});
+
+test('resize and monitor transfer only fronts eligible source-monitor peers', () => {
+    const f = arrangementFixture(4, exact);
+    f.windows[3].monitor = 0;
+    const sourceMonitor = f.win.monitor;
+    assert.notEqual(sourceMonitor, 0);
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', monitor: 0, width: 1000, bringToFront: 'same-app'}},
+    ])), true);
+    f.advance(50);
+    assert.equal(f.win.monitor, 0);
+    assert.equal(f.windows[1].monitor, sourceMonitor);
+    assert.equal(f.windows[2].monitor, sourceMonitor);
+    assert.equal(f.windows[3].requests.length, 0);
+    assert.deepEqual(f.recentCalls.map(item => item.win), [f.windows[1], f.windows[2], f.win]);
+    f.windows[1].emit('unmanaged');
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    assert.equal(f.win.monitor, sourceMonitor);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
