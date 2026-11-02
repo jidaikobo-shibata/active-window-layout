@@ -1369,3 +1369,39 @@ test('resize and monitor transfer only fronts eligible source-monitor peers', ()
     assert.equal(f.service._history.size, 0);
     f.cleanup();
 });
+
+for (const args of [
+    ['left', 'top', 'Infinity', '700'],
+    ['Infinity', 'top', '1000', '700'],
+    ['left', 'top', '-1', '700'],
+    ['left', 'top', '0', '700'],
+    ['left', 'top', '0.5', '700'],
+    ['left', 'top', '1e100', '700'],
+    ['2147483647', 'top', '1000', '700'],
+]) {
+    test(`legacy semantic rejects invalid geometry before mutation: ${args.join(',')}`, () => {
+        const f = fixture(exact);
+        f.win.maximized = 3;
+        assert.throws(() => f.service.MoveResizeSemantic(...args));
+        assert.equal(f.win.maximized, 3);
+        assert.equal(f.win.requests.length, 0);
+        assert.equal(f.service._history.size, 0);
+        assert.equal(f.service._placements.size, 0);
+        f.cleanup();
+    });
+}
+
+for (const args of [
+    ['left', 'top', '1000', '90%'],
+    ['null', 'null', 'null', 'null'],
+    ['-20', '10', '40', '40'],
+    ['10.5', '20.5', '1000.5', '700.5'],
+    ['center', 'bottom', '1e3', '700'],
+]) {
+    test(`legacy semantic retains accepted notation: ${args.join(',')}`, () => {
+        const f = fixture(exact);
+        assert.equal(f.service.MoveResizeSemantic(...args), true);
+        assert.equal(f.service._history.size, 1);
+        f.cleanup();
+    });
+}

@@ -632,6 +632,15 @@ class ServiceImpl {
         const px = nx !== null ? this._resolvePos(nx, wa.width, pw) : null;
         const py = ny !== null ? this._resolvePos(ny, wa.height, ph) : null;
 
+        // Preserve legacy parsing (including fractional numeric strings), but
+        // validate the integer coordinates GJS passes to Mutter before mutation.
+        // Legacy calls may request sizes below the conditional API's 50px floor.
+        Layout.validateRect({
+            x: Math.trunc(px === null ? rect.x : wa.x + px),
+            y: Math.trunc(py === null ? rect.y : wa.y + py),
+            width: Math.trunc(pw), height: Math.trunc(ph),
+        }, 1);
+
         this._perform([win], () =>
             this._applyMoveResizeInWorkArea(win, px, py, pw, ph, {x: nx, y: ny}));
         return true;
