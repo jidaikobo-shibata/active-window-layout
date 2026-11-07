@@ -5,9 +5,16 @@ const {test} = require('node:test');
 const vm = require('node:vm');
 
 const layoutSource = readFileSync(`${__dirname}/../layout.js`, 'utf8').replace(/^export /gm, '');
+function moduleAPI(file, exports) {
+    const text = readFileSync(`${__dirname}/../${file}`, 'utf8').replace(/^export /gm, '');
+    return vm.runInNewContext(`${text}\n;({${exports}})`);
+}
+const compatibilityAPI = moduleAPI('compatibility.js',
+    'parseRules, parseArrangement, normalizeNullable, resolvePosition, resolveSize');
+const syntaxV2API = moduleAPI('syntax-v2.js', 'parse, validate');
 const historySource = readFileSync(`${__dirname}/../history.js`, 'utf8').replace(/^export /gm, '');
 const layoutContext = {};
-vm.runInNewContext(`${layoutSource}\nthis.api = {MAX_WINDOWS, parseRules, parseArrangement, planActive, planLayout, matchesActive, matchesLayout, sameRect, validateRect};`, layoutContext);
+vm.runInNewContext(`${layoutSource}\nthis.api = {MAX_WINDOWS, resolvePosition, resolveSize, planActive, planLayout, matchesActive, matchesLayout, sameRect, validateRect};`, layoutContext);
 
 const source = readFileSync(`${__dirname}/../extension.js`, 'utf8')
     .replace(/^import .*;\n/gm, '')
@@ -147,7 +154,7 @@ function fixture({synchronous = false, refuse = false, rounding = true, deferred
     const logs = [];
     const context = {
         console: {error: (...args) => logs.push(args)},
-        Layout: layoutContext.api, GLib, Gio: {}, Meta: {MaximizeFlags: {BOTH: 3}, WindowType: {NORMAL: 0}},
+        Layout: layoutContext.api, Compatibility: compatibilityAPI, SyntaxV2: syntaxV2API, GLib, Gio: {}, Meta: {MaximizeFlags: {BOTH: 3}, WindowType: {NORMAL: 0}},
         Shell: {WindowTracker: {get_default: () => tracker}}, Extension: class {},
         global: {
             display,
@@ -1405,3 +1412,192 @@ for (const args of [
         f.cleanup();
     });
 }
+
+const v2 = rules => JSON.stringify({version: 2, rules});
+const readResult = value => JSON.parse(value);
+
+test('V2 validates without a focused window or side effects and reports field paths', () => {
+    const f = fixture(exact);
+    f.display.get_focus_window = () => null;
+    const json = v2([{then: {select: 'active', geometry: {width: 1000}}}]);
+    assert.equal(readResult(f.service.ValidateLayoutV2(json)).valid, true);
+    assert.equal(readResult(f.service.PreviewLayoutV2(json)).status, 'no-target');
+    assert.equal(readResult(f.service.ExecuteLayoutV2(json)).status, 'no-target');
+    assert.match(readResult(f.service.ValidateLayoutV2(v2([
+        {then: {select: 'active', geometry: {width: '1e3'}}},
+    ]))).error, /rules\[0\]\.then\.geometry\.width/);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('V2 preview preserves maximum state, geometry, history, focus, sources and stacking', () => {
+    const f = arrangementFixture(3, exact);
+    f.win.maximized = 3;
+    const original = f.windows.map(win => ({...win.rect}));
+    const json = v2([{then: {select: 'same-app', layout: {type: 'grid'}}}]);
+    const result = readResult(f.service.PreviewLayoutV2(json));
+    assert.equal(result.status, 'planned');
+    assert.equal(result.matchedRule, 0);
+    assert.equal(result.targetCount, 3);
+    assert.equal(result.placements.length, 3);
+    f.windows.forEach((win, index) => assert.deepEqual(win.rect, original[index]));
+    assert.equal(f.win.maximized, 3);
+    assert.equal(f.recentCalls.length, 0);
+    assert.equal(f.sources.size, 0);
+    assert.equal(f.service._history.size, 0);
+    assert.equal(f.display.get_focus_window(), f.win);
+    f.cleanup();
+});
+
+test('V2 executes a first matching resize, corrects rounded position, and supports undo', () => {
+    const f = fixture();
+    const original = {...f.win.rect};
+    const json = v2([
+        {when: {select: 'active', geometry: {width: 10}},
+            then: {select: 'active', geometry: {width: 1200}}},
+        {then: {select: 'active', geometry: {x: 'right', y: 'center', width: 1100, height: '90%'}}},
+    ]);
+    // Bad geometry in any rule must fail before any mutation, even if unmatched.
+    assert.throws(() => f.service.ExecuteLayoutV2(json), /rules\[0\]\.when\.geometry\.width/);
+    const fixed = JSON.parse(json);
+    fixed.rules[0].when.geometry.width = 50;
+    const result = readResult(f.service.ExecuteLayoutV2(JSON.stringify(fixed)));
+    assert.equal(result.status, 'requested');
+    assert.equal(result.matchedRule, 1);
+    f.advance(50);
+    assert.equal(f.win.rect.x + f.win.rect.width, f.wa.x + f.wa.width);
+    assert.equal(f.service._history.size, 1);
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    // This client rounds even restoration sizes, just as it does ordinary requests.
+    assert.equal(f.win.monitor, 1);
+    assert.ok(Math.abs(f.win.rect.width - original.width) <= 10);
+    f.cleanup();
+});
+
+test('V2 reports unchanged and no-match separately and warns about unreachable rules', () => {
+    const f = fixture(exact);
+    const unchanged = v2([{then: {select: 'active', geometry: {width: f.win.rect.width}}}]);
+    assert.equal(readResult(f.service.ExecuteLayoutV2(unchanged)).status, 'unchanged');
+    assert.equal(readResult(f.service.ExecuteLayoutV2(v2([
+        {when: {select: 'active', monitor: 99}, then: {select: 'active', monitor: 0}},
+    ]))).status, 'no-match');
+    const warning = readResult(f.service.ValidateLayoutV2(v2([
+        {then: {select: 'active', geometry: {width: 1000}}},
+        {then: {select: 'active', geometry: {width: 1200}}},
+    ])));
+    assert.equal(warning.valid, true);
+    assert.equal(warning.warnings[0].path, 'rules[1]');
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('V2 supports stacking alone and same-app monitor arrangements with grouped undo', () => {
+    const f = arrangementFixture(3, exact);
+    assert.equal(readResult(f.service.ExecuteLayoutV2(v2([
+        {then: {select: 'active', stacking: 'same-app'}},
+    ]))).status, 'requested');
+    assert.equal(f.recentCalls.length, 3);
+    assert.equal(f.win.requests.length, 0);
+    assert.equal(f.service.UndoLastOperation(), true);
+    const original = f.windows.map(win => ({...win.rect}));
+    const result = readResult(f.service.ExecuteLayoutV2(v2([
+        {when: {select: 'same-app', monitor: 1},
+            then: {select: 'same-app', monitor: 0, layout: {type: 'cascade'}}},
+    ])));
+    assert.equal(result.status, 'requested');
+    f.advance(50);
+    f.windows.forEach(win => assert.equal(win.monitor, 0));
+    assert.equal(f.service.UndoLastOperation(), true);
+    f.advance(50);
+    f.windows.forEach((win, index) => {
+        assert.equal(win.monitor, 1);
+        assert.deepEqual(win.rect, original[index]);
+    });
+    f.cleanup();
+});
+
+for (const [label, json, path] of [
+    ['missing version', '{"rules":[]}', 'version'],
+    ['unknown version', '{"version":3,"rules":[]}', 'version'],
+    ['invalid JSON', '{', '$'],
+    ['oversized input', ' '.repeat(65537), '$'],
+    ['null size', v2([{then: {select: 'active', geometry: {width: null}}}]), 'geometry.width'],
+    ['wrong axis', v2([{then: {select: 'active', geometry: {x: 'top'}}}]), 'geometry.x'],
+    ['no-op', v2([{then: {select: 'active'}}]), 'rules[0].then'],
+    ['ignored gap', v2([{then: {select: 'same-app', layout: {type: 'cascade', gap: 99}}}]), 'layout.gap'],
+    ['null cascade', v2([{then: {select: 'same-app', layout: {type: 'cascade', width: null}}}]), 'layout.width'],
+    ['extra field', v2([{then: {select: 'active', geometry: {widht: 1000}}}]), 'geometry.widht'],
+    ['old shape', v2([{then: {target: 'active', width: 1000}}]), 'then.target'],
+    ['bad stacking', v2([{then: {select: 'same-app', layout: {type: 'grid'}, stacking: 'same-app'}}]), 'then.stacking'],
+]) {
+    test(`V2 rejects ${label} with its location before changing state`, () => {
+        const f = fixture(exact);
+        f.win.maximized = 3;
+        const result = readResult(f.service.ValidateLayoutV2(json));
+        assert.equal(result.valid, false);
+        assert.ok(result.error.startsWith(path) || result.error.includes(`.${path}:`), result.error);
+        assert.throws(() => f.service.ExecuteLayoutV2(json));
+        assert.throws(() => f.service.PreviewLayoutV2(json));
+        assert.equal(f.win.maximized, 3);
+        assert.equal(f.win.requests.length, 0);
+        assert.equal(f.sources.size, 0);
+        assert.equal(f.service._history.size, 0);
+        f.cleanup();
+    });
+}
+
+test('V1 keeps ignored gap, null fields, synonyms, numeric strings and permissive percentages', () => {
+    const f = fixture(exact);
+    assert.equal(f.service.MoveResizeSemantic('middle', 'middle', '1e3', '70junk%'), true);
+    f.advance(50);
+    assert.equal(f.win.rect.width, 1000);
+    assert.equal(f.win.rect.height, Math.floor(f.wa.height * .7));
+    assert.equal(f.service.MoveResizeConditional(ruleSet([
+        {then: {target: 'active', width: null}},
+    ])), false);
+    const options = compatibilityAPI.parseArrangement('{"layout":"cascade","gap":99}');
+    assert.equal(options.gap, 99);
+    f.cleanup();
+});
+
+test('V2 validates resource limits and strict percentage tokens', () => {
+    const rule = {then: {select: 'active', geometry: {width: 1000}}};
+    assert.equal(syntaxV2API.validate(v2(Array(100).fill(rule))).valid, true);
+    assert.equal(syntaxV2API.validate(v2(Array(101).fill(rule))).valid, false);
+    assert.equal(syntaxV2API.validate(v2([])).valid, false);
+    for (const value of ['50%\n', ' 50%', '50.5%', '101%', '0%', -1, 49, 2147483648]) {
+        const result = syntaxV2API.validate(v2([
+            {then: {select: 'active', geometry: {width: value}}},
+        ]));
+        assert.equal(result.valid, false, String(value));
+    }
+});
+
+test('V2 preview and execution reject impossible destinations before history or unmaximizing', () => {
+    const f = fixture(exact);
+    f.win.maximized = 3;
+    for (const then of [
+        {select: 'active', monitor: 99},
+        {select: 'active', geometry: {x: 2147483647, width: 1000}},
+        {select: 'same-app', layout: {type: 'cascade', width: 2147483647}},
+    ]) {
+        const json = v2([{then}]);
+        for (const method of ['PreviewLayoutV2', 'ExecuteLayoutV2'])
+            assert.throws(() => f.service[method](json), /rules\[0\]\.then:/);
+    }
+    assert.equal(f.win.maximized, 3);
+    assert.equal(f.win.requests.length, 0);
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});
+
+test('V2 reports no-target rather than unchanged for unavailable same-app selection', () => {
+    const f = fixture(exact);
+    f.tracker.get_window_app = () => null;
+    assert.equal(readResult(f.service.ExecuteLayoutV2(v2([
+        {then: {select: 'same-app', layout: {type: 'grid'}}},
+    ]))).status, 'no-target');
+    assert.equal(f.service._history.size, 0);
+    f.cleanup();
+});

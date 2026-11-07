@@ -24,8 +24,8 @@ with zipfile.ZipFile(archives[0]) as archive:
         'identical': all(archive.read(name) == (root / name).read_bytes() for name in names)
     }))
 `, root, output], {encoding: 'utf8'}));
-        assert.deepEqual(result.names, ['LICENSE', 'README.md', 'extension.js',
-            'history.js', 'layout.js', 'metadata.json']);
+        assert.deepEqual(result.names, ['LICENSE', 'README.md', 'compatibility.js', 'extension.js',
+            'history.js', 'layout.js', 'metadata.json', 'syntax-v2.js']);
         assert.deepEqual(result.metadata['shell-version'], ['50']);
         assert.equal(result.identical, true);
     } finally {

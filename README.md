@@ -30,6 +30,106 @@ Gitタグは `v1.0.0`、表示用の `metadata.json` の `version-name` は `1.0
 [GNOMEのメタデータ仕様](https://gjs.guide/extensions/overview/anatomy.html#version)に従い、
 今回のGitタグ作成では既存の整数値を変更しない。
 
+## 開発版：版を分けた新記法（V2）
+
+既存の文字列メソッド、`MoveResizeConditional`、`ArrangeSameApp` はV1の互換入口として
+維持する。受理する記法・既定値を `compatibility.js` に隔離し、新記法の制約を持ち込まない。
+履歴・対象選択・配置計画・GNOMEへの要求は共用する。旧APIの削除予定はない。
+記法の版 `version: 2` は、製品の版やGNOME Extensionsの整数versionとは別。
+
+新形式は次のJSONを文字列として渡す。条件と操作を別々に検証し、対象選択 `select`、
+位置・サイズ `geometry`、複数配置 `layout`、前面化 `stacking` を分ける。
+
+```json
+{
+  "version": 2,
+  "rules": [
+    {
+      "when": {"select": "active", "geometry": {"width": 1000}},
+      "then": {"select": "same-app", "layout": {"type": "grid", "gap": 12}}
+    },
+    {
+      "then": {
+        "select": "active",
+        "geometry": {"x": "center", "y": "center", "width": 1000, "height": "90%"},
+        "stacking": "same-app"
+      }
+    }
+  ]
+}
+```
+
+| メソッド | 引数 | 戻り値（JSON文字列） |
+| --- | --- | --- |
+| `ValidateLayoutV2` | 設定JSON | `valid`、`warnings`、不正時は`error` |
+| `PreviewLayoutV2` | 設定JSON | 判定結果と配置計画。ウィンドウ・履歴・フォーカスを変更しない |
+| `ExecuteLayoutV2` | 設定JSON | 要求結果。実行した操作は従来と同じUndoで戻せる |
+
+既存と同じD-Bus名・オブジェクトパスを使い、メソッド名だけを変更する。
+上のJSONを既存のxremap例のJSON文字列と置き換え、
+`--method "$dest.ExecuteLayoutV2"` で呼び出せる。
+
+### V2の指定項目
+
+- 最上位：`version` は整数の `2` が必須。`rules` は1～100件。
+  `scope` は省略可能で `current-workspace-monitor` のみ。
+  `tolerance` は省略時20、0～4096の有限数。JSON全体は65536文字まで。
+- 条件 `when`：`select` は `active` または `same-app` が必須。
+  `active` は `geometry`、`same-app` は `layout` で判定する。
+  `monitor` だけの条件も可能。`tolerance` は条件ごとに上書き可能。
+  指定した条件はすべて満たす必要がある。`when` の省略は常に一致する。
+- 操作 `then`：`select` が必須。`active` は `geometry`、`monitor`、
+  `stacking` の少なくとも一つ。`same-app` は `layout` が必須。
+  複数の操作を順番に実行する構文ではなく、一致した一つのルールだけを実行する。
+- `geometry`：`x`、`y`、`width`、`height` のうち一つ以上。
+  位置は符号付き32ビット整数、または整数割合の `0%`～`100%`。
+  `x` は `left` / `center` / `right`、`y` は `top` / `center` / `bottom` も使用可能。
+  サイズは50以上の符号付き32ビット整数、または整数割合の `1%`～`100%`。
+  省略した項目は維持する。明示的な `null`、数値文字列、小数、`middle` は受理しない。
+- `layout`：`type` は `grid` / `columns` / `rows` / `cascade`。
+  前三者の `gap` は0～4096の整数、省略時12。
+  カスケードは `width`、`height`、`offsetX`、`offsetY` を指定でき、
+  既定値は `70%`、`75%`、40、40。サイズの記法はgeometryと同じ。
+  offsetは0～4096の整数。カスケードで `gap` を書くとエラー。
+- `monitor`：条件・操作とも0始まりの整数。操作で省略すると現在のモニター。
+- `stacking`：`active` の操作で `same-app` のみ指定可能。
+  リサイズせず、同じアプリを手前へまとめる指定だけでも利用できる。
+  `same-app` の整列は既存同様に対象を手前へまとめる。
+
+割合の位置は、**作業領域そのものの座標に掛ける割合ではない**。
+幅1920pxの作業領域に幅1000pxのウィンドウを置くとき、`x: "50%"` は
+`(1920 - 1000) × 0.5 = 460px`。サイズの `width: "50%"` は960pxになる。
+
+対象範囲、最大化解除、モニター移動時の省略座標、配置後の実寸補正、
+Undoの制約は、以下の現行JSON形式と共通。
+
+### 検証・プレビュー・実行結果
+
+`ValidateLayoutV2` は画面状態に依存しない記法検証のみ。
+たとえば `{"valid":false,"error":"rules[0].then.geometry.width: …","warnings":[]}`
+を返す。未知の項目や意味のない指定は拒否し、無条件ルール以降の到達しないルールは
+`warnings` に `path` と `message` を返す。警告は実行を妨げない。
+
+プレビューと実行は設定全体を検証してから現在の状態を読み、最初に一致するルールを選ぶ。
+選ばれた配置について、実在するモニター・成立するサイズ・座標の範囲も検証する。
+不正な設定や成立しない配置は、操作前にD-Busエラーにする。
+プレビューの成立は、その後の実行時点の画面状態まで保証しない。
+
+結果は `status`、`matchedRule`（0始まり。一致しなければnull）、
+`targetCount`（実際に変更・前面化を計画したウィンドウ数）、`warnings` を含む。
+
+| status | 意味 |
+| --- | --- |
+| `no-target` | 操作可能な対象がない |
+| `no-match` | 一致したルールがない |
+| `unchanged` | 変更する必要がない |
+| `planned` | プレビューで配置・前面化を計画した |
+| `requested` | 実行要求を発行した。アプリの受理・配置完了の保証ではない |
+
+プレビューはさらに `placements` を返す。各項目に `monitor`、`geometry`、
+`stackOnly`、`raise` が入り、前面化だけの項目はgeometryがnullになる。
+実行要求の途中で例外が起きた場合のUndo・自動ロールバックしない方針も既存と同じ。
+
 ## 既存の呼び出し方
 
 次のメソッドの名前・引数・戻り値は維持している。
@@ -366,7 +466,9 @@ GNOME独自のタイル・スナップ状態そのもの、最大化解除時に
 
 ## 実装構成と拡張
 
-- `layout.js`: JSON検証、配置計算、単一・複数ウィンドウの条件判定。
+- `compatibility.js`: 既存文字列・V1 JSONの検証と解釈。互換仕様を維持する。
+- `syntax-v2.js`: V2専用の記法検証。互換パーサーには依存しない。
+- `layout.js`: 配置計算、単一・複数ウィンドウの条件判定。
   GNOMEに依存しない。新しい配置はここに追加し、条件と実行で同じ計算を使う。
 - `history.js`: 一組単位の最大20件の履歴、終了したウィンドウの除去、監視の解放。
 - `extension.js`: D-Bus、対象選択と状態取得、配置の実行、GNOMEの状態復元。
@@ -392,13 +494,15 @@ bash scripts/pack.sh
 出力先は第一引数で変更できる。同名のZIPがすでにあればエラーにし、上書きしない。
 `dist/` はGitの追跡対象外。
 
-ZIPには次の6ファイルを入れる。
+ZIPには次の8ファイルを入れる。
 
 ```text
 metadata.json
 extension.js
 layout.js
 history.js
+compatibility.js
+syntax-v2.js
 LICENSE
 README.md
 ```

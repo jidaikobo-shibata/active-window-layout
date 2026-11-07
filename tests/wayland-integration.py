@@ -67,6 +67,25 @@ def check():
     assert inspect()['windows'][0]['focus']
     other = inspect()['otherWindows'][0]
     assert other['app'] != inspect()['windows'][0]['app']
+    # V2 uses actual exported D-Bus methods and unmodified production modules.
+    config_v2 = json.dumps({'version': 2, 'rules': [
+        {'then': {'select': 'active', 'geometry': {
+            'x': 'center', 'y': 'center', 'width': 1000, 'height': 700}}},
+    ]})
+    before_v2 = inspect()
+    assert json.loads(call('ValidateLayoutV2', '(s)', (config_v2,))[0])['valid']
+    preview_v2 = json.loads(call('PreviewLayoutV2', '(s)', (config_v2,))[0])
+    assert preview_v2['status'] == 'planned' and preview_v2['targetCount'] == 1
+    assert inspect() == before_v2, 'V2 validation/preview must not mutate the session'
+    executed_v2 = json.loads(call('ExecuteLayoutV2', '(s)', (config_v2,))[0])
+    assert executed_v2['status'] == 'requested'
+    settle()
+    assert inspect()['history'] == before_v2['history'] + 1
+    assert call('UndoLastOperation') == (True,)
+    settle()
+    expect_same({w['id']: w['rect'] for w in before_v2['windows']})
+    assert inspect()['history'] == before_v2['history']
+    print('PASS: V2 validation/preview have no side effects; D-Bus execution and undo', flush=True)
     for layout in ['grid', 'columns', 'rows', 'cascade']:
         call('Raise', '(i)', (other['id'],), True)
         settle()

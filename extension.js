@@ -3,6 +3,8 @@ import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import * as Layout from './layout.js';
+import * as Compatibility from './compatibility.js';
+import * as SyntaxV2 from './syntax-v2.js';
 import { OperationHistory } from './history.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
@@ -54,6 +56,19 @@ const IFACE_XML = `
         <method name="MoveResizeConditional">
             <arg type="s" name="rules" direction="in"/>
             <arg type="b" name="ok" direction="out"/>
+        </method>
+
+        <method name="ValidateLayoutV2">
+            <arg type="s" name="config" direction="in"/>
+            <arg type="s" name="result" direction="out"/>
+        </method>
+        <method name="PreviewLayoutV2">
+            <arg type="s" name="config" direction="in"/>
+            <arg type="s" name="result" direction="out"/>
+        </method>
+        <method name="ExecuteLayoutV2">
+            <arg type="s" name="config" direction="in"/>
+            <arg type="s" name="result" direction="out"/>
         </method>
 
         <method name="MoveResizeSemantic">
@@ -114,7 +129,7 @@ class ServiceImpl {
         return this._maximizeFlags(win) !== 0;
     }
 
-    _watchSemanticPlacement(win, x, y, force = false, targetMonitor = null) {
+    _watchSemanticPlacement(win, x, y, force = false, targetMonitor = null, resolvePosition = Layout.resolvePosition) {
         // Numeric coordinates and left/top don't depend on the resulting size.
         const dependsOnSize = value => typeof value === 'string' &&
             value !== 'left' && value !== 'top';
@@ -149,8 +164,8 @@ class ServiceImpl {
 
                 const wa = workspace.get_work_area_for_monitor(monitor);
                 const rect = win.get_frame_rect();
-                const px = x === null ? rect.x : wa.x + this._resolvePos(x, wa.width, rect.width);
-                const py = y === null ? rect.y : wa.y + this._resolvePos(y, wa.height, rect.height);
+                const px = x === null ? rect.x : wa.x + resolvePosition(x, wa.width, rect.width);
+                const py = y === null ? rect.y : wa.y + resolvePosition(y, wa.height, rect.height);
                 // Only move: requesting the size again can trigger another rounding.
                 if (px !== rect.x || py !== rect.y)
                     win.move_frame(true, px, py);
@@ -201,7 +216,8 @@ class ServiceImpl {
         if (semantic || moving) {
             const x = moving ? semantic?.x ?? dx : semantic.x;
             const y = moving ? semantic?.y ?? dy : semantic.y;
-            this._watchSemanticPlacement(win, x, y, Boolean(moving), destination?.monitor ?? null);
+            this._watchSemanticPlacement(win, x, y, Boolean(moving), destination?.monitor ?? null,
+                semantic?.resolvePosition ?? Layout.resolvePosition);
         }
         this._ensureResizableMovable(win);
         if (moving)
@@ -234,68 +250,6 @@ class ServiceImpl {
                 height
             );
         }
-    }
-
-    // Number-like strings are number
-    _normalizeNullable(value) {
-        if (value === null || value === 'null')
-            return null;
-
-        if (!isNaN(value))
-            return Number(value);
-
-        return value;
-    }
-
-    // positional vocabulary
-    _resolvePos(value, total, windowSize) {
-        if (typeof value === 'number')
-            return value;
-
-        if (typeof value !== 'string')
-            throw new Error(`Invalid position value: ${value}`);
-
-        switch (value) {
-            case 'left':
-            case 'top':
-                return 0;
-
-            case 'center':
-            case 'middle':
-                return Math.floor((total - windowSize) / 2);
-
-            case 'right':
-            case 'bottom':
-                return Math.max(0, total - windowSize);
-        }
-
-        if (value.endsWith('%')) {
-            const n = parseInt(value, 10);
-            if (!isNaN(n))
-                return Math.floor((total - windowSize) * n / 100);
-        }
-
-        throw new Error(`Unknown position keyword: ${value}`);
-    }
-
-    // Size Vocabulary
-    _resolveSize(value, total) {
-        if (typeof value === 'number')
-            return value;
-
-        if (typeof value !== 'string')
-            throw new Error(`Invalid size value: ${value}`);
-
-        if (value.endsWith('%')) {
-            const n = parseInt(value, 10);
-            if (!isNaN(n))
-                return Math.floor(total * n / 100);
-        }
-
-        if (!isNaN(value))
-            return Number(value);
-
-        throw new Error(`Unknown size value: ${value}`);
     }
 
     // D-Bus method: GetWorkArea() -> (i, i, i, i)
@@ -589,14 +543,71 @@ class ServiceImpl {
         return true;
     }
 
+    ValidateLayoutV2(json) {
+        return JSON.stringify(SyntaxV2.validate(json));
+    }
+
+    PreviewLayoutV2(json) {
+        return this._layoutV2(json, false);
+    }
+
+    ExecuteLayoutV2(json) {
+        return this._layoutV2(json, true);
+    }
+
+    _layoutV2(json, execute) {
+        // Parse the entire configuration before inspecting or changing windows.
+        const config = SyntaxV2.parse(json);
+        const needsApp = config.rules.some(rule =>
+            rule.when?.target === 'same-app' || rule.then.target === 'same-app' ||
+            rule.then.bringToFront === 'same-app');
+        const context = this._context(needsApp);
+        const result = {status: 'no-target', matchedRule: null, targetCount: 0,
+            warnings: config.warnings};
+        if (!context)
+            return JSON.stringify(result);
+        const index = config.rules.findIndex(rule =>
+            !rule.when || this._matches(rule.when, context, config.tolerance));
+        if (index === -1)
+            return JSON.stringify({...result, status: 'no-match'});
+        result.matchedRule = index;
+        let plan;
+        try {
+            plan = this._plan(config.rules[index].then, context);
+        } catch (error) {
+            throw new Error(`rules[${index}].then: ${error.message}`);
+        }
+        // Geometry planning and validation are identical for preview and execution.
+        for (const item of plan) {
+            if (!item.stackOnly)
+                Layout.validateRect(item.rect);
+        }
+        result.targetCount = plan.length;
+        result.status = !plan.length ?
+            (!context.activeEligible || (config.rules[index].then.target === 'same-app' &&
+                !context.windows.length) ? 'no-target' : 'unchanged') :
+            execute ? 'requested' : 'planned';
+        if (execute) {
+            this._executePlan(plan, context.wa);
+        } else {
+            result.placements = plan.map(item => ({
+                monitor: item.monitor ?? item.win.get_monitor(),
+                geometry: item.rect ?? null,
+                stackOnly: Boolean(item.stackOnly),
+                raise: Boolean(item.raise),
+            }));
+        }
+        return JSON.stringify(result);
+    }
+
     ArrangeSameApp(json) {
-        const action = Layout.parseArrangement(json);
+        const action = Compatibility.parseArrangement(json);
         const context = this._context(true);
         return context ? this._executePlan(this._plan(action, context), context.wa) : false;
     }
 
     MoveResizeConditional(json) {
-        const config = Layout.parseRules(json);
+        const config = Compatibility.parseRules(json);
         const needsApp = config.rules.some(rule =>
             rule.when?.target === 'same-app' || rule.then.target === 'same-app' ||
             rule.then.bringToFront === 'same-app');
@@ -619,18 +630,18 @@ class ServiceImpl {
         const rect = win.get_frame_rect();
 
         // "null" → normalized to null
-        const nx = this._normalizeNullable(x);
-        const ny = this._normalizeNullable(y);
-        const nw = this._normalizeNullable(width);
-        const nh = this._normalizeNullable(height);
+        const nx = Compatibility.normalizeNullable(x);
+        const ny = Compatibility.normalizeNullable(y);
+        const nw = Compatibility.normalizeNullable(width);
+        const nh = Compatibility.normalizeNullable(height);
 
         // 1. Resolve size first
-        const pw = nw !== null ? this._resolveSize(nw, wa.width) : rect.width;
-        const ph = nh !== null ? this._resolveSize(nh, wa.height) : rect.height;
+        const pw = nw !== null ? Compatibility.resolveSize(nw, wa.width) : rect.width;
+        const ph = nh !== null ? Compatibility.resolveSize(nh, wa.height) : rect.height;
 
         // 2. Use the requested size initially, then correct using the actual size.
-        const px = nx !== null ? this._resolvePos(nx, wa.width, pw) : null;
-        const py = ny !== null ? this._resolvePos(ny, wa.height, ph) : null;
+        const px = nx !== null ? Compatibility.resolvePosition(nx, wa.width, pw) : null;
+        const py = ny !== null ? Compatibility.resolvePosition(ny, wa.height, ph) : null;
 
         // Preserve legacy parsing (including fractional numeric strings), but
         // validate the integer coordinates GJS passes to Mutter before mutation.
@@ -642,7 +653,7 @@ class ServiceImpl {
         }, 1);
 
         this._perform([win], () =>
-            this._applyMoveResizeInWorkArea(win, px, py, pw, ph, {x: nx, y: ny}));
+            this._applyMoveResizeInWorkArea(win, px, py, pw, ph, {x: nx, y: ny, resolvePosition: Compatibility.resolvePosition}));
         return true;
     }
 
