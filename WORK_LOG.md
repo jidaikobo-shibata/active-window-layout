@@ -471,3 +471,19 @@
 - 新記法は開発版。複数アクション列、保存済み設定、配置完了通知は未実装。
 - 公開前に表示用バージョンを整理し、最終ZIPのshexli検証を行う。
   今回はコミットまでで、push・タグ・アップロードは行わない。
+
+## 2026-11-15: 配布ZIPの最終確認
+
+- 現行fb03033（V2記法を含む）からgnome-extensions packで提出用ZIPを作成。
+  表示用version-nameは現行の1.0.0を維持。整数versionは提出サイトが管理する。
+- 操作・配布テスト134件成功。分離GNOME WaylandでV2と旧API、Undo、
+  モニター移動、前面化、閉じたあとのフォーカス順の統合テスト成功。
+- 利用者の指示でshexli 0.2.1をuvの隔離ツール環境に導入。
+  検査依存はtree-sitter 0.26.1とtree-sitter-javascript 0.25.0。
+  拡張本体の実行依存は追加していない。
+- 配布ZIPそのものをshexliで検査。仕様2026-04-02、status clean、指摘0件。
+  同梱8ファイル（JavaScript 5ファイル）と現在のソースの一致・ZIP整合性も確認。
+- ZIP: dist/2026-11-15/active-window-layout@jidaikobo.shibata.shell-extension.zip
+  SHA-256: 0292bb94d4ff538dd81a751226eb61936274fe7bbba32ba0b4d22f5364e51d99
+- 未pushの実装と本記録をGitHubへpushする。extensions.gnome.orgへの送信は未実施。
+  アップロードページは認証が必要で内部の案内は未確認。静的検査合格は審査承認を保証しない。
